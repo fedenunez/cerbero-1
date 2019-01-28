@@ -1,0 +1,14 @@
+# vi:si:et:sw=4:sts=4:ts=4:syntax=python
+# -*- Mode: Python -*-
+
+
+class Package(package.Package):
+
+    name = 'rbeolibs'
+    shortdesc = 'Libraries needed by rbeo'
+    longdesc = 'Libraries needed by rbeo'
+
+    deps = ['base-system-1.0','libnice']
+
+    files = ['libnice:libs', 'libnice:plugins_net','glib:libs:lang:bins:schemas', 'openssl:libs','libffi:libs','gettext:libs:lang','gnustl:stl:devel','libcurl', 'libevent:libs']
+    files_devel = ['libnice:plugins_net_devel','libevent']
