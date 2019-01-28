@@ -8,4 +8,6 @@ class Recipe(recipe.Recipe):
     stype = SourceType.TARBALL
     url = 'https://curl.haxx.se/download/curl-%(version)s.tar.bz2'
     tarball_dirname = 'curl-%(version)s'
+    tarball_checksum = '7f8240048907e5030f67be0a6129bc4b333783b9cca1391026d700835a788dde'
     deps = [ 'openssl' ]
+    files_devel = ['include', 'lib/libcurl.a']
