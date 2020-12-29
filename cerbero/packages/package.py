@@ -17,11 +17,12 @@
 # Boston, MA 02111-1307, USA.
 
 import os
+import re
 
-from cerbero.build.filesprovider import flatten_files_list, FilesProvider
+from cerbero.build.filesprovider import FilesProvider
 from cerbero.enums import License, Platform
 from cerbero.packages import PackageType
-from cerbero.utils import remove_list_duplicates
+from cerbero.utils import remove_list_duplicates, messages as m
 
 
 class PackageBase(object):
@@ -71,6 +72,14 @@ class PackageBase(object):
     @type resources_postinstall = str
     @cvar resources_postremove = filename for the post-remove script
     @type resources_postremove = str
+    @cvar wix_use_fragment = uses fragments instead of merge modules
+    @type wix_use_fragment = bool
+    @cvar strip: strip binaries for this package
+    @type strip: bool
+    @cvar strip_dirs: directories to strip
+    @type strip: list
+    @cvar strip_excludes: files that won't be stripped
+    @type strip_excludes: list
     '''
     name = 'default'
     shortdesc = 'default'
@@ -78,7 +87,7 @@ class PackageBase(object):
     version = '1.0'
     org = 'default'
     uuid = None
-    license = License.GPL
+    license = License.LGPLv2_1Plus
     vendor = 'default'
     url = 'default'
     ignore_package_prefix = False
@@ -93,6 +102,10 @@ class PackageBase(object):
     resources_preinstall = 'preinstall'
     resources_postinstall = 'postinstall'
     resources_postremove = 'postremove'
+    wix_use_fragment = False
+    strip = False
+    strip_dirs = ['bin']
+    strip_excludes = []
 
     def __init__(self, config, store):
         self.config = config
@@ -137,8 +150,28 @@ class PackageBase(object):
         raise NotImplemented("'all_files_list' must be implemented by "
                              "subclasses")
 
-    def post_install(self, paths):
+    def pre_package(self):
+        '''
+        Subclasses can override to to perform actions before packaging
+        '''
         pass
+
+    def post_package(self, paths, output_dir):
+        '''
+        Subclasses can override it to perform actions after packaging.
+
+        @param paths: list of paths for the files created during packaging
+        @type paths: str
+        @param output_dir: absolute path of output directory set when
+                           executing package command
+        @type output_dir: str
+        @return: list of paths with created files
+        @rtype: list
+        '''
+        if hasattr(self, 'post_install'):
+            m.warning("Package.post_install is deprecated, use Package.post_package instead.")
+            return self.post_install(paths)
+        return paths
 
     def set_mode(self, package_type):
         self.package_mode = package_type
@@ -414,7 +447,10 @@ class MetaPackage(PackageBase):
                         platform_attr_name)
                 if self.config.target_platform in platform_attr:
                     platform_list = platform_attr[self.config.target_platform]
-                    ret.extend(platform_list)
+                    # Add to packages list, but do not duplicate
+                    for p in platform_list:
+                        if p not in ret:
+                            ret.append(p)
             return ret
         else:
             return PackageBase.__getattribute__(self, name)
@@ -443,14 +479,16 @@ class SDKPackage(MetaPackage):
 
     '''
 
+    # Can be overriden by the package file, f.ex.
+    # packages/gstreamer-1.0/gstreamer-1.0.package
     root_env_var = 'CERBERO_SDK_ROOT_%(arch)s'
     osx_framework_library = None
 
     def __init__(self, config, store):
         MetaPackage.__init__(self, config, store)
 
-    def get_root_env_var(self):
-        return (self.root_env_var % {'arch': self.config.target_arch}).upper()
+    def get_root_env_var(self, arch):
+        return (self.root_env_var % {'arch': re.sub(r'[^a-zA-Z0-9]', '_', arch)}).upper()
 
 
 class InstallerPackage(MetaPackage):
@@ -493,12 +531,6 @@ class App(Package):
     @type command: list
     @cvar wrapper: suffix filename for the main executable wrapper
     @type wrapper: str
-    @cvar strip: strip binaries for this package
-    @type strip: bool
-    @cvar strip_dirs: directories to strip
-    @type strip: list
-    @cvar strip_excludes: files that won't be stripped
-    @type strip_excludes: list
     @cvar resources_info_plist: Info.plist template file
     @type resources_info_plist: string
     @cvar resources_distribution: Distribution XML template file
@@ -516,9 +548,6 @@ class App(Package):
     commands = []  # list of tuples ('CommandName', path/to/binary')
     wrapper = 'app_wrapper.tpl'
     resources_wix_installer = None
-    strip = False
-    strip_dirs = ['bin']
-    strip_excludes = []
     resources_info_plist = 'Info.plist'
     resources_distribution = 'distribution.xml'
     osx_create_dmg = True
@@ -551,7 +580,8 @@ class App(Package):
             # Also include all the libraries provided by the recipes we depend
             # on.
             for recipe in self.cookbook.list_recipe_deps(self.app_recipe):
-                files.extend(flatten_files_list(list(recipe.libraries().values())))
+                for each in recipe.libraries().values():
+                    files.extend(each)
                 files.extend(recipe.files_list_by_category(FilesProvider.PY_CAT))
                 files.extend(recipe.files_list_by_category(FilesProvider.TYPELIB_CAT))
 

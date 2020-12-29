@@ -4,9 +4,12 @@
 class Recipe(custom.GStreamer):
     name = 'gst-plugins-base-1.0'
     btype = BuildType.MESON
-    tarball_checksum = '6e325958526d6901546da6c1e93a990ede1772b2d6ffde1bf459fca35fea7e63'
+    tarball_checksum = 'dd04fb1f7826e2f6d9b4d66fc22f19cc6a47c301e13041f0ee3d7f65c89b05ac'
     meson_options = {# enabled plugins
                      'gl': 'enabled',
+                     'gl-graphene': 'enabled',
+                     'gl-png': 'enabled',
+                     'gl-jpeg': 'enabled',
                      'libvisual': 'enabled',
                      'ogg': 'enabled',
                      'opus': 'enabled',
@@ -15,7 +18,7 @@ class Recipe(custom.GStreamer):
                      'vorbis': 'enabled',
                      # disabled plugins
                      'tremor': 'disabled'}
-    deps = ['glib', 'gstreamer-1.0', 'libxml2', 'libogg', 'pango', 'libtheora',
+    deps = ['glib', 'gstreamer-1.0', 'libogg', 'pango', 'libtheora',
             'libvisual', 'libvorbis', 'zlib', 'orc', 'opus', 'graphene',
             'libjpeg-turbo', 'libpng']
     platform_deps = {Platform.ANDROID: [ 'tremor' ], Platform.IOS: [ 'tremor' ] }
@@ -149,9 +152,13 @@ class Recipe(custom.GStreamer):
             'lib/gstreamer-1.0/libgsttcp.a', 'lib/gstreamer-1.0/libgsttcp.la',
     ]
 
-    files_plugins_sys = []
+    files_plugins_sys = [
+            'lib/gstreamer-1.0/libgstopengl%(mext)s',
+    ]
 
-    files_plugins_sys_devel = []
+    files_plugins_sys_devel = [
+             'lib/gstreamer-1.0/libgstopengl.a', 'lib/gstreamer-1.0/libgstopengl.la',
+    ]
 
     platform_files_plugins_codecs = {
         Platform.ANDROID: [
@@ -171,51 +178,14 @@ class Recipe(custom.GStreamer):
             ]
     }
 
-    platform_files_plugins_sys = {
-        Platform.LINUX: [
-             'lib/gstreamer-1.0/libgstopengl%(mext)s',
-            ],
-        Platform.WINDOWS: [
-             'lib/gstreamer-1.0/libgstopengl%(mext)s',
-            ],
-        Platform.DARWIN: [
-             'lib/gstreamer-1.0/libgstopengl%(mext)s',
-            ],
-        Platform.IOS: [
-             'lib/gstreamer-1.0/libgstopengl%(mext)s',
-            ],
-        Platform.ANDROID: [
-             'lib/gstreamer-1.0/libgstopengl%(mext)s',
-            ]
-    }
-
-    platform_files_plugins_sys_devel = {
-        Platform.LINUX: [
-             'lib/gstreamer-1.0/libgstopengl.a', 'lib/gstreamer-1.0/libgstopengl.la',
-            ],
-        Platform.WINDOWS: [
-             'lib/gstreamer-1.0/libgstopengl.a', 'lib/gstreamer-1.0/libgstopengl.la',
-            ],
-        Platform.DARWIN: [
-             'lib/gstreamer-1.0/libgstopengl.a', 'lib/gstreamer-1.0/libgstopengl.la',
-            ],
-        Platform.IOS: [
-             'lib/gstreamer-1.0/libgstopengl.a', 'lib/gstreamer-1.0/libgstopengl.la',
-            ],
-        Platform.ANDROID: [
-             'lib/gstreamer-1.0/libgstopengl.a', 'lib/gstreamer-1.0/libgstopengl.la',
-            ]
-    }
-
     files_lang = ['gst-plugins-base-1.0']
 
     files_typelibs = [
         'GstAllocators-1.0',
         'GstApp-1.0',
-        'GstFft-1.0',
         'GstGL-1.0',
         'GstPbutils-1.0',
-        'GstRiff-1.0',
+#        'GstRiff-1.0',         Gir disabled due to incompatibilities
         'GstRtp-1.0',
         'GstRtsp-1.0',
         'GstSdp-1.0',
@@ -225,55 +195,41 @@ class Recipe(custom.GStreamer):
         ]
 
     def prepare(self):
-        self.append_env('CFLAGS', '-DGSTREAMER_GLIB_COCOA_NSAPPLICATION=1')
-        self.append_env('OBJCFLAGS', '-DGSTREAMER_GLIB_COCOA_NSAPPLICATION=1')
+        # Disable Cocoa NSApp integration since we enable the Cocoa MainLoop
+        # integration in the GLib recipe
+        if self.config.target_platform in (Platform.DARWIN, Platform.IOS):
+            self.append_env('CFLAGS', '-DGSTREAMER_GLIB_COCOA_NSAPPLICATION=1')
+            self.append_env('OBJCFLAGS', '-DGSTREAMER_GLIB_COCOA_NSAPPLICATION=1')
 
-        if self.config.variants.cdparanoia:
-            self.deps.append('cdparanoia')
-            self.files_plugins_sys += ['lib/gstreamer-1.0/libgstcdparanoia%(mext)s']
-            self.files_plugins_sys_devel += [
-                'lib/gstreamer-1.0/libgstcdparanoia.a', 'lib/gstreamer-1.0/libgstcdparanoia.la',
-            ]
-            self.meson_options['cdparanoia'] = 'enabled'
-        else:
-            self.meson_options['cdparanoia'] = 'disabled'
-
-        if self.config.variants.x11:
-            self.files_plugins_sys += [
-                 'lib/gstreamer-1.0/libgstximagesink%(mext)s',
-                 'lib/gstreamer-1.0/libgstxvimagesink%(mext)s',
-            ]
-
-            self.files_plugins_sys_devel += [
-                 'lib/gstreamer-1.0/libgstximagesink.a', 'lib/gstreamer-1.0/libgstximagesink.la',
-                 'lib/gstreamer-1.0/libgstxvimagesink.a', 'lib/gstreamer-1.0/libgstxvimagesink.la',
-            ]
-            self.meson_options['x11'] = 'enabled'
-            self.meson_options['xvideo'] = 'enabled'
-        else:
-            self.meson_options['x11'] = 'disabled'
-            self.meson_options['xvideo'] = 'disabled'
-
-        if self.config.variants.alsa:
-            self.files_plugins_sys += ['lib/gstreamer-1.0/libgstalsa%(mext)s']
-            self.files_plugins_sys_devel += [
-                'lib/gstreamer-1.0/libgstalsa.a', 'lib/gstreamer-1.0/libgstalsa.la',
-            ]
-            self.meson_options['alsa'] = 'enabled'
-        else:
-            self.meson_options['alsa'] = 'disabled'
-
-        if self.config.variants.nodebug:
-            self.append_env('CFLAGS', '-DGST_LEVEL_MAX=GST_LEVEL_FIXME')
+        self.enable_plugin('cdparanoia', 'sys', 'cdparanoia', dep='cdparanoia')
+        self.enable_plugin('ximagesink', 'sys', 'x11')
+        self.enable_plugin('xvimagesink', 'sys', 'x11', option='xvideo')
+        self.enable_plugin('alsa', 'sys', 'alsa')
 
         if self.config.target_platform in (Platform.ANDROID, Platform.IOS):
             self.meson_options['tremor'] = 'enabled'
 
-        if self.config.target_platform == Platform.ANDROID:
-            v = DistroVersion.get_android_api_version(self.config.target_distro_version)
-            if self.config.target_arch in [Architecture.ARM, Architecture.ARMv7, Architecture.X86] and v < 21:
-                # FIXME: HACK to make projects compile with NDK 16
-                # we fail to compile with -D_FILE_OFFSET_BITS=64
-                # because we don't use clang and we use a platform < 21 (Lollipop)
-                # See $NDK_ROOT/sysroot/usr/include/sys/mman.h as one example
-                self.set_env('ac_cv_func_mmap', 'no')
+        if self.using_uwp():
+            # All these except libvisual can be ported to Meson/UWP
+            self.disable_plugin('libvisual', 'vis', dep='libvisual')
+            self.disable_plugin('ogg', 'codecs', dep='libogg')
+            self.disable_plugin('pango', 'core', dep='pango')
+            self.disable_plugin('theora', 'codecs', dep='libtheora')
+            self.disable_plugin('vorbis', 'codecs', dep='libvorbis')
+            if self.config.target_arch in (Architecture.ARM64, Architecture.X86_64, Architecture.X86):
+                self.deps.append('angle-uwp')
+                # To avoid complicating winrt vs win32 detection,
+                # explicitly select api/platform/winsys
+                self.meson_options['gl_api'] = 'gles2'
+                self.meson_options['gl_platform'] = 'egl'
+                self.meson_options['gl_winsys'] = 'winrt'
+            else:
+                self.disable_plugin('opengl', 'sys', 'gl', library_name='gl')
+            self.meson_options['gl-graphene'] = 'disabled'
+            self.meson_options['gl-png'] = 'disabled'
+            self.meson_options['gl-jpeg'] = 'disabled'
+            for dep in ('graphene', 'libpng', 'libjpeg-turbo'):
+                self.deps.remove(dep)
+
+        if self.config.variants.nodebug:
+            self.append_env('CFLAGS', '-DGST_LEVEL_MAX=GST_LEVEL_FIXME')

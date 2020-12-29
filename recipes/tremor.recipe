@@ -4,10 +4,10 @@ from cerbero.utils import shell
 class Recipe(recipe.Recipe):
     name = 'tremor'
     version = '1.2.1+r19427'
-    stype = SourceType.SVN
-    url = 'https://svn.xiph.org/trunk/Tremor/'
-    revision = '19427'
-    licenses = [License.BSD_like]
+    stype = SourceType.TARBALL
+    url = 'https://gstreamer.freedesktop.org/data/src/mirror/tremor-1.2.1+r19427.tar.xz'
+    tarball_checksum = "4bdbb655ea0e6a70b0ad20f90f747d18936d80a4366020581eb7fc5d1b3550bf"
+    licenses = [{License.BSD_like: ['COPYING']}]
     deps = ['libogg']
     config_sh = 'sh autogen.sh'
     patches = ['tremor/0001-Prevent-symbol-conflicts.patch',
@@ -31,7 +31,7 @@ class Recipe(recipe.Recipe):
             # Disable thumb code generation
             self.append_env('CFLAGS', '-marm')
 
-    def configure(self):
+    async def configure(self):
         if self.config.target_platform == Platform.IOS:
             shell.replace(os.path.join(self.build_dir, 'configure.in'), {'-D_ARM_ASSEM_':''})
-        super(recipe.Recipe, self).configure()
+        await super(recipe.Recipe, self).configure()

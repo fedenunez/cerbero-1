@@ -54,6 +54,7 @@ file_types = [
     ('PEM certificate', 'copy'),
     ('data', 'copy'),
     ('GVariant Database', 'copy'),
+    ('directory', 'recurse'),
 ]
 
 class OSXUniversalGenerator(object):
@@ -77,7 +78,7 @@ class OSXUniversalGenerator(object):
     LIPO_CMD = 'lipo'
     FILE_CMD = 'file'
 
-    def __init__(self, output_root):
+    def __init__(self, output_root, logfile=None):
         '''
         @output_root: the output directory where the result will be generated
 
@@ -86,19 +87,22 @@ class OSXUniversalGenerator(object):
         if self.output_root.endswith('/'):
             self.output_root = self.output_root[:-1]
         self.missing = []
+        self.logfile = logfile
 
-    def merge_files(self, filelist, dirs):
+    async def merge_files(self, filelist, dirs):
         if len(filelist) == 0:
             return
         for f in filelist:
-            self.do_merge(f, dirs)
+            await self.do_merge(f, dirs)
 
-    def merge_dirs(self, input_roots):
-        if not os.path.exists(self.output_root):
-            os.mkdir(self.output_root)
+    def merge_dirs(self, input_roots, output_root=None):
+        if output_root == None:
+            output_root = self.output_root
+        if not os.path.exists(output_root):
+            os.makedirs(output_root)
         self.parse_dirs(input_roots)
 
-    def create_universal_file(self, output, inputlist, dirs):
+    async def create_universal_file(self, output, inputlist, dirs):
         tmp_inputs = []
         # relocate all files with the prefix of the merged file.
         # which must be done before merging them.
@@ -109,22 +113,20 @@ class OSXUniversalGenerator(object):
             shutil.copy(f, tmp.name)
             prefix_to_replace = [d for d in dirs if d in f][0]
             relocator = OSXRelocator (self.output_root, prefix_to_replace,
-                                      False)
+                                      False, logfile=self.logfile)
             # since we are using a temporary file, we must force the library id
             # name to real one and not based on the filename
             relocator.relocate_file(tmp.name)
             relocator.change_id(tmp.name, id=f.replace(prefix_to_replace, self.output_root))
-        cmd = '%s -create %s -output %s' % (self.LIPO_CMD,
-            ' '.join([f.name for f in tmp_inputs]), output)
-        self._call(cmd)
+        cmd = [self.LIPO_CMD, '-create'] + [f.name for f in tmp_inputs] + ['-output', output]
+        shell.new_call(cmd)
         for tmp in tmp_inputs:
             tmp.close()
 
     def get_file_type(self, filepath):
-        cmd = '%s -bh "%s"' % (self.FILE_CMD, filepath)
-        return self._call(cmd)[:-1] #remove trailing \n
+        return shell.check_output([self.FILE_CMD, '-bh', filepath])[:-1] #remove trailing \n
 
-    def _detect_merge_action(self, files_list):
+    async def _detect_merge_action(self, files_list):
         actions = []
         for f in files_list:
             if not os.path.exists(f):
@@ -154,9 +156,9 @@ class OSXUniversalGenerator(object):
                              % (str(ftype), str(files_list)))
         return actions[0]
 
-    def do_merge(self, filepath, dirs):
+    async def do_merge(self, filepath, dirs):
         full_filepaths = [os.path.join(d, filepath) for d in dirs]
-        action = self._detect_merge_action(full_filepaths)
+        action = await self._detect_merge_action(full_filepaths)
 
         #pick the first file as the base one in case of copying/linking
         current_file = full_filepaths[0]
@@ -172,18 +174,30 @@ class OSXUniversalGenerator(object):
         elif action == 'merge':
             if not os.path.exists(output_dir):
                 os.makedirs(output_dir)
-            self.create_universal_file(output_file, full_filepaths, dirs)
+            await self.create_universal_file(output_file, full_filepaths, dirs)
         elif action == 'skip':
             pass #just pass
+        elif action == 'recurse':
+            self.merge_dirs (full_filepaths, output_file)
         else:
             raise Exception('unexpected action %s' % action)
 
     def parse_dirs(self, dirs, filters=None):
         self.missing = []
 
+        queue = asyncio.Queue()
+        async def parse_dirs_worker():
+            while True:
+                current_file, dirs = await queue.get()
+                await self.do_merge(current_file, dirs)
+                queue.task_done()
+        async def queue_done():
+            await queue.join()
+
         dir_path = dirs[0]
         if dir_path.endswith('/'):
             dir_path = dir_path[:-1]
+
         for dirpath, dirnames, filenames in os.walk(dir_path):
             current_dir = ''
             token = ' '
@@ -196,7 +210,16 @@ class OSXUniversalGenerator(object):
                 if filters is not None and os.path.splitext(f)[1] not in filters:
                     continue
                 current_file = os.path.join(current_dir, f)
-                self.do_merge(current_file, dirs)
+                queue.put_nowait ((current_file, dirs))
+
+        async def parse_dirs_main():
+            tasks = []
+            for i in range(4):
+                tasks.append(asyncio.ensure_future (parse_dirs_worker()))
+            await run_tasks (tasks, queue_done())
+
+        print ("parsing dirs")
+        run_until_complete(parse_dirs_main())
 
     def _copy(self, src, dest):
         if not os.path.exists(os.path.dirname(dest)):
@@ -228,10 +251,6 @@ class OSXUniversalGenerator(object):
         rel_path = os.path.relpath(os.path.dirname(target), os.path.dirname(dest))
         dest_target = os.path.join(rel_path, os.path.basename(target))
         os.symlink(dest_target, dest)
-
-    def _call(self, cmd, cwd=None):
-        cmd = cmd or self.root
-        return shell.check_call(cmd, cmd_dir=cwd, split=False, shell=True)
 
 
 class Main(object):

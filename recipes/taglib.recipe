@@ -12,10 +12,9 @@ class Recipe(recipe.Recipe):
     url = 'https://github.com/taglib/taglib/releases/download/v1.11.1/taglib-%(version)s.tar.gz'
     tarball_checksum = 'b6d1a5a610aae6ff39d93de5efd0fdc787aa9e9dc1e7026fa4c961b26563526b'
     # either LGPLv2.1 or MPLv1.1
-    licenses = [License.LGPLv2_1]
+    licenses = [License.LGPLv2_1Plus]
     configure_options = '-DWITH_MP4=ON -DWITH_ASF=ON -DBUILD_SHARED_LIBS=1 -DBUILD_STATIC_LIBS=1 -DCMAKE_DISABLE_FIND_PACKAGE_Boost=TRUE'
     btype = BuildType.CMAKE
-    platform_deps = {Platform.ANDROID: ['gnustl']}
     patches = ['taglib/0001-Link-with-correct-STL-on-Android.patch',
                'taglib/0002-Build-a-static-and-non-static-version.patch',
               ]
@@ -32,8 +31,8 @@ class Recipe(recipe.Recipe):
             self.append_env('CXXFLAGS', '-frtti')
         self.configure_options += ' -DZLIB_ROOT=%s ' % self.config.prefix
 
-    def install(self):
-        super(recipe.Recipe, self).install()
+    async def install(self):
+        await super(recipe.Recipe, self).install()
         shutil.move(
                 os.path.join(self.config.prefix, 'lib', 'libtag_static.a'),
                 os.path.join(self.config.prefix, 'lib', 'libtag.a'))
@@ -45,3 +44,4 @@ class Recipe(recipe.Recipe):
         libtool_la = LibtoolLibrary('tag', 1, 7, None, self.config.libdir,
                 self.config.target_platform, deps)
         libtool_la.save()
+        super().post_install()

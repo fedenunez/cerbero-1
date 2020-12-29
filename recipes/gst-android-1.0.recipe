@@ -7,9 +7,13 @@ from custom import list_gstreamer_1_0_plugins_by_category
 class Recipe(recipe.Recipe):
     name = 'gst-android-1.0'
     version = '0.1'
-    licenses = [License.LGPLv2_1]
+    licenses = [License.LGPLv2_1Plus]
     stype = SourceType.CUSTOM
     btype = BuildType.CUSTOM
+    deps = ['gstreamer-1.0', 'gst-plugins-base-1.0', 'gst-plugins-good-1.0',
+        'gst-plugins-ugly-1.0', 'gst-plugins-bad-1.0', 'gst-libav-1.0',
+        'gst-devtools-1.0', 'gst-rtsp-server-1.0', 'gst-editing-services-1.0'
+    ]
 
     files_devel = [
             'share/gst-android/ndk-build/gstreamer_android-1.0.c.in',
@@ -22,7 +26,7 @@ class Recipe(recipe.Recipe):
             'share/gst-android/ndk-build/fontconfig',
             ]
 
-    def install(self):
+    async def install(self):
         ndk_build_dir_dst = os.path.join(self.config.prefix, 'share', 'gst-android', 'ndk-build')
         if not os.path.exists(ndk_build_dir_dst):
             os.makedirs(ndk_build_dir_dst)

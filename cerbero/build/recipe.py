@@ -21,20 +21,94 @@ import logging
 import shutil
 import tempfile
 import time
+import inspect
+import asyncio
 from functools import reduce
+from pathlib import Path
 
+from cerbero.enums import License, LicenseDescription, LibraryType
 from cerbero.build import build, source
-from cerbero.build.filesprovider import FilesProvider
+from cerbero.build.filesprovider import FilesProvider, UniversalFilesProvider, UniversalFlatFilesProvider
 from cerbero.config import Platform
 from cerbero.errors import FatalError
 from cerbero.ide.vs.genlib import GenLib, GenGnuLib
 from cerbero.tools.osxuniversalgenerator import OSXUniversalGenerator
 from cerbero.tools.osxrelocator import OSXRelocator
 from cerbero.utils import N_, _
-from cerbero.utils import shell, add_system_libs
+from cerbero.utils import shell, add_system_libs, run_tasks
 from cerbero.utils import messages as m
 from cerbero.tools.libtool import LibtoolLibrary
 
+LICENSE_INFO_FILENAME = 'README-LICENSE-INFO.txt'
+
+
+def log_step_output(recipe, stepfunc):
+    def open_file():
+        step = stepfunc.__name__
+        path = "%s/%s-%s.log" % (recipe.config.logs, recipe.name, step)
+        recipe.old_logfile = recipe.logfile # Allow calling build steps recursively
+        recipe.logfile = open(path, 'w+')
+
+    def close_file():
+        # if logfile is empty, remove it
+        pos = recipe.logfile.tell()
+        recipe.logfile.close()
+        if pos == 0:
+            os.remove(recipe.logfile.name)
+        recipe.logfile = recipe.old_logfile
+
+    def get_all_prev_steps_logfiles():
+        current_step = stepfunc.__name__
+        logfiles = []
+        for step in recipe._steps:
+            step = step[1]
+            if step == current_step:
+                break
+            path = "%s/%s-%s.log" % (recipe.config.logs, recipe.name, step)
+            try:
+                logfiles.append(open(path, 'r'))
+            except OSError:
+                continue
+        return logfiles
+
+    def handle_exception():
+        '''
+        Dump contents of log files for current and previous steps on error
+        '''
+        logfiles = get_all_prev_steps_logfiles()
+        # log file of current step
+        recipe.logfile.seek(0)
+        logfiles.append(recipe.logfile)
+        # Print all
+        for logfile in logfiles:
+            data = logfile.read()
+            logfile.close()
+            m.action('Contents of {}:'.format(logfile.name))
+            if data:
+                print(data)
+
+    def wrapped():
+        open_file()
+        try:
+            stepfunc()
+        except FatalError:
+            handle_exception()
+            raise
+        close_file()
+
+    async def async_wrapped():
+        open_file()
+        try:
+            await stepfunc()
+        except FatalError:
+            handle_exception()
+            raise
+        close_file()
+
+    if asyncio.iscoroutinefunction(stepfunc):
+        return async_wrapped
+    else:
+        return wrapped
 
 class MetaRecipe(type):
     ''' This metaclass modifies the base classes of a Receipt, adding 2 new
@@ -81,11 +155,17 @@ class BuildSteps(object):
     GEN_LIBFILES = (N_('Gen Library File'), 'gen_library_file')
     MERGE = (N_('Merge universal binaries'), 'merge')
     RELOCATE_OSX_LIBRARIES = (N_('Relocate OSX libraries'), 'relocate_osx_libraries')
+    CODE_SIGN = (N_('Codesign build-tools'), 'code_sign')
 
-    def __new__(klass):
+    def __new__(cls):
         return [BuildSteps.FETCH, BuildSteps.EXTRACT,
                 BuildSteps.CONFIGURE, BuildSteps.COMPILE, BuildSteps.INSTALL,
                 BuildSteps.POST_INSTALL]
+
+    @classmethod
+    def all_names(cls):
+        members = inspect.getmembers(cls, lambda x: isinstance(x, tuple))
+        return tuple(e[1][1] for e in members)
 
 
 class Recipe(FilesProvider, metaclass=MetaRecipe):
@@ -111,10 +191,43 @@ class Recipe(FilesProvider, metaclass=MetaRecipe):
     @type platform_deps: dict
     @cvar runtime_dep: runtime dep common to all recipes
     @type runtime_dep: bool
+    @cvar bash_completions: list of bash completion scripts for shell
+    @type bash_completions: list
     '''
 
-    name = None
+    # Licenses are declared as an array of License.enums or dicts of the type:
+    #
+    #   {License.enum: ['path-to-license-file-in-source-tree']}
+    #
+    # If the array element is License.enum or if in a dict, the value of
+    # a License.enum key is None, the license does not have any specific
+    # copyright or author info, and the copy inside data/licenses will be
+    # used instead.
+    #
+    # This format is chosen to allow you to declare when a recipe is licensed
+    # under multiple licenses in various combinations. For example:
+    #
+    #  (LICENSE1 && LICENSE2) || (LICENSE3) || (LICENSE4 && LICENSE5)
+    #
+    # can be represented as
+    #
+    #  licenses = [
+    #   License.L1,
+    #   {License.L2: ['l2.txt'], License.L3: ['l3.txt', 'other-info.txt']},
+    #   {License.L4: None, License.Misc: ['some-info.txt']},
+    #  ]
+    #
+    # Reasons for choosing this format:
+    # * Many BSD projects are licensed under multiple BSD licenses, which must be
+    #   followed together.
+    # * Some other projects are licensed under multiple licenses, such as MPL
+    #   || LGPL, and so on.
+    # * Some projects have miscellaneous files with important copyright of
+    #   licensing information
     licenses = []
+
+    # Other recipe metadata
+    name = None
     version = None
     package_name = None
     sources = None
@@ -122,11 +235,22 @@ class Recipe(FilesProvider, metaclass=MetaRecipe):
     btype = build.BuildType.AUTOTOOLS
     deps = None
     platform_deps = None
-    force = False
     runtime_dep = False
-    _default_steps = BuildSteps()
+    bash_completions = None
 
-    def __init__(self, config):
+    # Internal properties
+    force = False
+    logfile = None
+    _default_steps = BuildSteps()
+    _licenses_disclaimer = '''\
+DISCLAIMER: THIS LICENSING INFORMATION IS PROVIDED ON A BEST-EFFORT BASIS
+AND IS NOT MEANT TO BE LEGAL ADVICE. PLEASE TALK TO A LAWYER FOR ADVICE ON
+SOFTWARE LICENSE COMPLIANCE.\n\n'''
+    _licenses_terms = 'The {} in this package may be used under the terms of license file(s):\n\n'
+    # Used in recipes/custom.py. See also: cookbook.py:_load_recipes_from_dir()
+    _using_manifest_force_git = False
+
+    def __init__(self, config, env):
         self.config = config
         if self.package_name is None:
             self.package_name = "%s-%s" % (self.name, self.version)
@@ -137,12 +261,24 @@ class Recipe(FilesProvider, metaclass=MetaRecipe):
         self.build_dir = os.path.join(self.config.sources, self.package_name)
         self.build_dir = os.path.abspath(self.build_dir)
         self.deps = self.deps or []
+        if self.config.prefix_is_build_tools():
+            if self.btype == build.BuildType.MESON:
+                self.deps.append('meson')
+            elif self.btype == build.BuildType.CMAKE:
+                self.deps.append('cmake')
+        self.env = env.copy()
+        if self.bash_completions and config.target_platform in [Platform.LINUX]:
+            config.bash_completions.update(self.bash_completions)
+            self.deps.append('bash-completion')
         self.platform_deps = self.platform_deps or {}
         self._steps = self._default_steps[:]
         if self.config.target_platform == Platform.WINDOWS:
             self._steps.append(BuildSteps.GEN_LIBFILES)
         if self.config.target_platform == Platform.DARWIN:
             self._steps.append(BuildSteps.RELOCATE_OSX_LIBRARIES)
+        if self.config.target_platform == Platform.DARWIN and \
+                self.config.prefix == self.config.build_tools_prefix:
+            self._steps.append(BuildSteps.CODE_SIGN)
         FilesProvider.__init__(self, config)
         try:
             self.stype.__init__(self)
@@ -151,12 +287,24 @@ class Recipe(FilesProvider, metaclass=MetaRecipe):
             # should only work with subclasses that really have Build and
             # Source in bases
             pass
+        self.decorate_build_steps()
 
     def __str__(self):
         return self.name
 
     def __repr__(self):
         return "<Recipe %s>" % self.name
+
+    def decorate_build_steps(self):
+        '''
+        Decorate build step functions with a function that sets self.logfile
+        for each build step for this recipe
+        '''
+        steps = BuildSteps.all_names()
+        for name, func in inspect.getmembers(self, inspect.ismethod):
+            if name not in steps:
+                continue
+            setattr(self, name, log_step_output(self, func))
 
     def prepare(self):
         '''
@@ -175,7 +323,7 @@ class Recipe(FilesProvider, metaclass=MetaRecipe):
         return [x for x in elems if x not in used and (used.append(x) or True)]
 
     def _get_la_deps_from_pc (self, laname, pcname, env):
-        ret = shell.check_call('pkg-config --libs-only-l --static ' + pcname, env=env)
+        ret = shell.check_output(['pkg-config', '--libs-only-l', '--static', pcname], env=env, logfile=self.logfile)
         # Don't add the library itself to the list of dependencies
         return ['lib' + lib[2:] for lib in self._get_unique_ordered(ret.split()) if lib[2:] != laname[3:]]
 
@@ -247,20 +395,21 @@ class Recipe(FilesProvider, metaclass=MetaRecipe):
             'gstadaptivedemux-1.0' : None,
             'gstbadaudio-1.0' : 'gstreamer-bad-audio-1.0',
             'gstbasecamerabinsrc-1.0' : None,
+            'gstcodecs-1.0' : None,
             'gstisoff-1.0' : None,
-            'gstphotography-1.0' : None,
             'gsturidownloader-1.0' : None,
             'gstrtspserver-1.0' : 'gstreamer-rtsp-server-1.0',
             'gstvalidate-1.0' : 'gst-validate-1.0',
+            'gstvalidate-default-overrides-1.0' : None,
             'ges-1.0' : 'gst-editing-services-1.0',
         }
         generated_libs = []
 
         pluginpcdir = os.path.join(self.config.libdir, 'gstreamer-1.0', 'pkgconfig')
-        env = os.environ.copy()
+        env = self.env.copy()
         env['PKG_CONFIG_LIBDIR'] += os.pathsep + pluginpcdir
         if self.use_system_libs:
-            add_system_libs(self.config, env)
+            add_system_libs(self.config, env, self.env)
 
         # retrieve the list of files we need to generate
         for f in self.devel_files_list():
@@ -330,7 +479,8 @@ class Recipe(FilesProvider, metaclass=MetaRecipe):
         '''
         Make OSX libraries relocatable
         '''
-        relocator = OSXRelocator(self.config.prefix, self.config.prefix, True)
+        relocator = OSXRelocator(self.config.prefix, self.config.prefix, True,
+                logfile=self.logfile)
         def get_real_path(fp):
             return os.path.realpath(os.path.join(self.config.prefix, fp))
 
@@ -345,12 +495,124 @@ class Recipe(FilesProvider, metaclass=MetaRecipe):
                 if file_is_relocatable(x)]):
             relocator.relocate_file(f)
 
+    def code_sign(self):
+        '''
+        Codesign OSX build-tools binaries
+        '''
+        def get_real_path(fp):
+            return os.path.realpath(os.path.join(self.config.prefix, fp))
+
+        def file_is_bin(fp):
+            return fp.split('/')[0] in ['bin']
+
+        for f in set([get_real_path(x) for x in self.files_list() \
+                if file_is_bin(x)]):
+            shell.new_call(['codesign', '-f', '-s', '-', f], logfile=self.logfile, env=self.env)
+
+    def _install_srcdir_license(self, lfiles, install_dir):
+        '''
+        Copy specific licenses from the project's source dir. Used for BSD,
+        MIT, and other licenses which have copyright headers that are important
+        to fulfilling the licensing terms.
+        '''
+        files = []
+        for f in lfiles:
+            fname = f.replace('/', '_')
+            if fname == LICENSE_INFO_FILENAME:
+                raise RuntimeError('{}.recipe: license file collision: {!r}'
+                                   .format(self.name, LICENSE_INFO_FILENAME))
+            dest = str(install_dir / fname)
+            src = os.path.join(self.build_dir, f)
+            if shell.DRY_RUN:
+                print('Copying {!r} to {!r}'.format(src, dest))
+            else:
+                shutil.copyfile(src, dest)
+            files.append(fname)
+        return files
+
+    def _install_datadir_license(self, lobj, install_dir):
+        '''
+        Copy generic licenses from the cerbero licenses datadir.
+        '''
+        if lobj == License.Proprietary:
+            # No license file needed, binaries will not be publicly redistributed
+            return []
+        if lobj == License.PublicDomain:
+            return []
+        if lobj.acronym.startswith(('BSD', 'MIT')):
+            msg = '{}.recipe: must specify the license file for BSD and MIT licenses ' \
+                'using a dict of the form: ' \
+                "{License.enum: ['path-to-license-file-in-source-tree']}"
+            raise RuntimeError(msg.format(self.name))
+        fname = lobj.acronym + '.txt'
+        dest = str(install_dir / fname)
+        src = os.path.join(self.config.data_dir, 'licenses', lobj.acronym + '.txt')
+        if shell.DRY_RUN:
+            print('Copying {!r} to {!r}'.format(src, dest))
+        else:
+            shutil.copyfile(src, dest)
+        return [fname]
+
+    def _write_license_readme(self, licenses_files, install_dir, applies_to):
+        with (install_dir / LICENSE_INFO_FILENAME).open('w') as f:
+            f.write(self._licenses_disclaimer)
+            f.write(self._licenses_terms.format(applies_to))
+            f.write('\n(OR)\n'.join([' (AND) '.join(lfiles) for lfiles in licenses_files]))
+
+    def _install_licenses(self, install_dir, licenses):
+        if not install_dir.is_dir():
+            install_dir.mkdir(parents=True)
+        licenses_files = []
+        for each in licenses:
+            lfiles = []
+            if isinstance(each, dict):
+                for lobj, value in each.items():
+                    assert(isinstance(lobj, LicenseDescription))
+                    if value is None:
+                        lfiles += self._install_datadir_license(lobj, install_dir)
+                    else:
+                        assert(isinstance(value, list))
+                        lfiles += self._install_srcdir_license(value, install_dir)
+            elif isinstance(each, LicenseDescription):
+                lfiles = self._install_datadir_license(each, install_dir)
+            else:
+                raise AssertionError('{}.recipe: unknown license array element type'.format(self.name))
+            licenses_files.append(lfiles)
+        return licenses_files
+
+    def install_licenses(self):
+        '''
+        NOTE: This list of licenses is only indicative and is not guaranteed to
+        match the actual licenses and copyright headers you need to display in
+        your application or adhere to during license compliance.
+        '''
+        install_dir = Path(self.config.prefix) / 'share' / 'licenses' / self.name
+        # Install licenses for libraries
+        if isinstance(self.licenses, list):
+            licenses_files = self._install_licenses(install_dir, self.licenses)
+        else:
+            raise AssertionError('{}.recipe: unknown licenses type'.format(self.name))
+        # Only write license info for binaries if different from libraries
+        if not hasattr(self, 'licenses_bins'):
+            self._write_license_readme(licenses_files, install_dir, 'libraries and binaries')
+            return
+        else:
+            self._write_license_readme(licenses_files, install_dir, 'libraries')
+        # Install licenses for binaries
+        install_dir = install_dir / 'bins'
+        if isinstance(self.licenses_bins, list):
+            licenses_files = self._install_licenses(install_dir, self.licenses_bins)
+            self._write_license_readme(licenses_files, install_dir, 'binaries')
+        elif self.licenses_bins is not None:
+            raise AssertionError('{}.recipe: unknown licenses_bins type'.format(self.name))
+
     def post_install(self):
         '''
         Runs post installation steps
         '''
         if self.btype == build.BuildType.MESON and self.name.startswith('gst'):
             self.generate_gst_la_files()
+        self.install_licenses()
 
     def built_version(self):
         '''
@@ -376,6 +638,23 @@ class Recipe(FilesProvider, metaclass=MetaRecipe):
                 deps.append('gobject-introspection')
         return deps
 
+    @staticmethod
+    def flatten_licenses(licenses):
+        '''
+        self.licenses* can be arrays of LicenseDescription or arrays of dicts
+        with LicenseDescription as keys. Flatten that to just get a list of
+        licenses.
+        '''
+        flattened = []
+        for each in licenses:
+            if isinstance(each, LicenseDescription):
+                flattened.append(each)
+            elif isinstance(each, dict):
+                flattened += each.keys()
+            else:
+                raise AssertionError('Unknown license array element: {!r}'.format(each))
+        return flattened
+
     def list_licenses_by_categories(self, categories):
         licenses = {}
         for c in categories:
@@ -384,29 +663,36 @@ class Recipe(FilesProvider, metaclass=MetaRecipe):
                                 'defined' % c)
 
             if not c:
-                licenses[None] = self.licenses
+                licenses[None] = self.flatten_licenses(self.licenses)
                 continue
 
             attr = 'licenses_' + c
             platform_attr = 'platform_licenses_' + c
             if hasattr(self, attr):
-                licenses[c] = getattr(self, attr)
+                licenses[c] = self.flatten_licenses(getattr(self, attr))
             elif hasattr(self, platform_attr):
                 l = getattr(self, platform_attr)
-                licenses[c] = l.get(self.platform, [])
+                licenses[c] = self.flatten_licenses(l.get(self.platform, []))
             else:
-                licenses[c] = self.licenses
+                licenses[c] = self.flatten_licenses(self.licenses)
         return licenses
 
     def gen_library_file(self, output_dir=None):
         '''
         Generates library files (.lib or .dll.a) for the DLLs provided by this recipe
         '''
+        # Don't need import libraries for runtime-only deps
+        if self.runtime_dep:
+            return
+        # Don't need to generate .dll.a import libraries when building for UWP
+        if self.using_uwp():
+            return
         if output_dir is None:
             output_dir = os.path.join(self.config.prefix,
                                       'lib' + self.config.lib_suffix)
         # Generate a GNU import library or an MSVC import library
-        genlib = GenGnuLib() if self.using_msvc() else GenLib()
+        genlibcls = GenGnuLib if self.using_msvc() else GenLib
+        genlib = genlibcls(self.config, self.logfile)
         # Generate the .dll.a or .lib file as needed
         for (libname, dllpaths) in list(self.libraries().items()):
             if len(dllpaths) > 1:
@@ -484,10 +770,15 @@ class MetaUniversalRecipe(type):
     def __init__(cls, name, bases, ns):
         step_func = ns.get('_do_step')
         for _, step in BuildSteps():
-            setattr(cls, step, lambda self, name=step: step_func(self, name))
+            async def doit(recipe, step_name=step):
+                ret = step_func(recipe, step_name)
+                if asyncio.iscoroutine(ret):
+                    await ret
+            if step_func:
+                setattr(cls, step, doit)
 
 
-class UniversalRecipe(object, metaclass=MetaUniversalRecipe):
+class BaseUniversalRecipe(object, metaclass=MetaUniversalRecipe):
     '''
     Stores similar recipe objects that are going to be built together
 
@@ -521,12 +812,6 @@ class UniversalRecipe(object, metaclass=MetaUniversalRecipe):
     def is_empty(self):
         return len(self._recipes) == 0
 
-    @property
-    def steps(self):
-        if self.is_empty():
-            return []
-        return self._proxy_recipe.steps[:]
-
     def __getattr__(self, name):
         if not self._proxy_recipe:
             raise AttributeError(_("Attribute %s was not found in the "
@@ -540,45 +825,67 @@ class UniversalRecipe(object, metaclass=MetaUniversalRecipe):
             for o in self._recipes.values():
                 setattr(o, name, value)
 
-    def get_for_arch (self, arch, name):
+    @property
+    def steps(self):
+        if self.is_empty():
+            return []
+        return self._proxy_recipe.steps[:]
+
+    async def _do_step(self, step):
+
+        async def _async_run_step(recipe, step, arch):
+            # Call the step function
+            stepfunc = getattr(recipe, step)
+            try:
+                ret = stepfunc()
+                if asyncio.iscoroutine (ret):
+                    await ret
+            except FatalError as e:
+                e.arch = arch
+                raise e
+
+        if step == BuildSteps.FETCH[1]:
+            arch, recipe = list(self._recipes.items())[0]
+            await _async_run_step(recipe, step, arch)
+            return
+
+        tasks = []
+        for arch, recipe in self._recipes.items():
+            if step in (BuildSteps.CONFIGURE[1],) \
+               or (step == BuildSteps.EXTRACT[1] \
+                   and self.stype in (source.SourceType.TARBALL,)):
+                tasks.append(asyncio.ensure_future(_async_run_step(recipe, step, arch)))
+            else:
+                await _async_run_step(recipe, step, arch)
+        if tasks:
+            await run_tasks (tasks)
+
+    def get_for_arch(self, arch, name):
         if arch:
             return getattr (self._recipes[arch], name)
         else:
             return getattr (self, name)
 
-    def _do_step(self, step):
-        if step in BuildSteps.FETCH:
-            arch, recipe = list(self._recipes.items())[0]
-            # No, really, let's not download a million times...
-            stepfunc = getattr(recipe, step)
-            try:
-                stepfunc()
-            except FatalError as e:
-                e.arch = arch
-                raise e
-            return
 
-        for arch, recipe in self._recipes.items():
-            config = self._config.arch_config[arch]
-            config.do_setup_env()
-            stepfunc = getattr(recipe, step)
+class UniversalRecipe(BaseUniversalRecipe, UniversalFilesProvider):
+    '''
+    Unversal recipe for Android with subdirs for each architecture
+    '''
 
-            # Call the step function
-            try:
-                stepfunc()
-            except FatalError as e:
-                e.arch = arch
-                raise e
+    def __init__(self, config):
+        super().__init__(config)
+        UniversalFilesProvider.__init__(self, config)
 
 
-class UniversalFlatRecipe(UniversalRecipe):
+class UniversalFlatRecipe(BaseUniversalRecipe, UniversalFlatFilesProvider):
     '''
     Unversal recipe for iOS and OS X creating flat libraries
     in the target prefix instead of subdirs for each architecture
     '''
 
     def __init__(self, config):
-        UniversalRecipe.__init__(self, config)
+        super().__init__(config)
+        UniversalFlatFilesProvider.__init__(self, config)
 
     @property
     def steps(self):
@@ -586,84 +893,26 @@ class UniversalFlatRecipe(UniversalRecipe):
             return []
         return self._proxy_recipe.steps[:] + [BuildSteps.MERGE]
 
-    def merge(self):
+    async def merge(self):
         arch_inputs = {}
         for arch, recipe in self._recipes.items():
-            # change the prefix temporarly to the arch prefix where files are
-            # actually installed
-            recipe.config.prefix = os.path.join(self.config.prefix, arch)
             arch_inputs[arch] = set(recipe.files_list())
-            recipe.config.prefix = self._config.prefix
 
         # merge the common files
         inputs = reduce(lambda x, y: x & y, arch_inputs.values())
         output = self._config.prefix
-        generator = OSXUniversalGenerator(output)
-        dirs = [os.path.join(self._config.prefix, arch) for arch in self._recipes.keys()]
-        generator.merge_files(inputs, dirs)
+        generator = OSXUniversalGenerator(output, logfile=self.logfile)
+        dirs = [recipe.config.prefix for arch, recipe in self._recipes.items()]
+        await generator.merge_files(inputs, dirs)
 
-        # merge the architecture specific files
-        for arch in self._recipes.keys():
-            ainputs = list(inputs ^ arch_inputs[arch])
-            output = self._config.prefix
-            generator = OSXUniversalGenerator(output)
-            generator.merge_files(ainputs,
-                    [os.path.join(self._config.prefix, arch)])
-
-    def _do_step(self, step):
-        if step in BuildSteps.FETCH:
-            # No, really, let's not download a million times...
-            stepfunc = getattr(list(self._recipes.values())[0], step)
-            stepfunc()
-            return
-
-        # For the universal build we need to configure both architectures with
-        # with the same final prefix, but we want to install each architecture
-        # on a different path (eg: /path/to/prefix/x86).
-
-        archs_prefix = list(self._recipes.keys())
-
+        # Collect files that are only in one or more archs, but not all archs
+        arch_files = {}
         for arch, recipe in self._recipes.items():
-            config = self._config.arch_config[arch]
-            config.do_setup_env()
-            stepfunc = getattr(recipe, step)
-
-            # Create a stamp file to list installed files based on the
-            # modification time of this file
-            if step in [BuildSteps.INSTALL[1], BuildSteps.POST_INSTALL[1]]:
-                time.sleep(2) #wait 2 seconds to make sure new files get the
-                              #proper time difference, this fixes an issue of
-                              #the next recipe to be built listing the previous
-                              #recipe files as their own
-                tmp = tempfile.NamedTemporaryFile()
-                # the modification time resolution depends on the filesystem,
-                # where FAT32 has a resolution of 2 seconds and ext4 1 second
-                t = time.time() - 2
-                os.utime(tmp.name, (t, t))
-
-            # Call the step function
-            stepfunc()
-
-            # Move installed files to the architecture prefix
-            if step in [BuildSteps.INSTALL[1], BuildSteps.POST_INSTALL[1]]:
-                installed_files = shell.find_newer_files(self._config.prefix,
-                                                         tmp.name, True)
-                tmp.close()
-                for f in installed_files:
-
-                    def not_in_prefix(src):
-                        for p in archs_prefix + ['Libraries']:
-                            if src.startswith(p):
-                                return True
-                        return False
-
-                    # skip files that are installed in the arch prefix
-                    if not_in_prefix(f):
-                        continue
-                    src = os.path.join(self._config.prefix, f)
-
-                    dest = os.path.join(self._config.prefix,
-                                        recipe.config.target_arch, f)
-                    if not os.path.exists(os.path.dirname(dest)):
-                        os.makedirs(os.path.dirname(dest))
-                    shutil.move(src, dest)
+            for f in list(inputs ^ arch_inputs[arch]):
+                if f not in arch_files:
+                    arch_files[f] = {(arch, recipe)}
+                else:
+                    arch_files[f].add((arch, recipe))
+        # merge the architecture specific files
+        for f, archs in arch_files.items():
+            await generator.merge_files([f], [recipe.config.prefix for arch, recipe in archs])

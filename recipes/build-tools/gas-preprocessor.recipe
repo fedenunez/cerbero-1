@@ -6,15 +6,15 @@ from cerbero.utils import shell
 class Recipe(recipe.Recipe):
     name = 'gas-preprocessor'
     version = '0.0.0'
-    licenses = [License.GPLv2]
+    licenses = [License.GPLv2Plus]
     btype = BuildType.CUSTOM
     remotes = {'origin': 'https://github.com/libav/gas-preprocessor'}
-    commit = 'f8a2d8c155bda8d925a7ee2ed8315c553a2b865f'
+    commit = 'd09971fad329d32df19f5bbafe88cf2f0ed04ed7'
 
-    def install(self):
+    async def install(self):
         if not os.path.exists(os.path.join(self.config.prefix, 'bin')):
             os.makedirs(os.path.join(self.config.prefix, 'bin'))
         shutil.copy (os.path.join(self.build_dir, 'gas-preprocessor.pl'),
                      os.path.join(self.config.prefix, 'bin'))
-        shell.call ('chmod +x %s' %
-                os.path.join(self.config.prefix, 'bin', 'gas-preprocessor.pl'))
+        await shell.async_call ('chmod +x %s' %
+                os.path.join(self.config.prefix, 'bin', 'gas-preprocessor.pl'), env=self.env)

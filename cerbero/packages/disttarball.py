@@ -17,12 +17,16 @@
 # Boston, MA 02111-1307, USA.
 
 import os
+import shutil
 import tarfile
+import tempfile
 
 import cerbero.utils.messages as m
-from cerbero.utils import _
-from cerbero.errors import UsageError, EmptyPackageError
+from cerbero.utils import shell, _
+from cerbero.enums import Platform
+from cerbero.errors import FatalError, UsageError, EmptyPackageError
 from cerbero.packages import PackagerBase, PackageType
+from cerbero.tools import strip
 
 
 class DistTarball(PackagerBase):
@@ -35,9 +39,12 @@ class DistTarball(PackagerBase):
         self.package_prefix = ''
         if self.config.packages_prefix is not None:
             self.package_prefix = '%s-' % self.config.packages_prefix
+        self.compress = config.package_tarball_compression
+        if self.compress not in ('bz2', 'xz'):
+            raise UsageError('Invalid compression type {!r}'.format(self.compress))
 
     def pack(self, output_dir, devel=True, force=False, keep_temp=False,
-             split=True, package_prefix=''):
+             split=True, package_prefix='', strip_binaries=False):
         try:
             dist_files = self.files_list(PackageType.RUNTIME, force)
         except EmptyPackageError:
@@ -61,8 +68,12 @@ class DistTarball(PackagerBase):
 
         filenames = []
         if dist_files:
-            runtime = self._create_tarball(output_dir, PackageType.RUNTIME,
-                                           dist_files, force, package_prefix)
+            if not strip_binaries:
+                runtime = self._create_tarball(output_dir, PackageType.RUNTIME,
+                                               dist_files, force, package_prefix)
+            else:
+                runtime = self._create_tarball_stripped(output_dir, PackageType.RUNTIME,
+                                                        dist_files, force, package_prefix)
             filenames.append(runtime)
 
         if split and devel and len(devel_files) != 0:
@@ -71,10 +82,51 @@ class DistTarball(PackagerBase):
             filenames.append(devel)
         return filenames
 
-    def _get_name(self, package_type, ext='tar.bz2'):
-        return "%s%s-%s-%s-%s%s.%s" % (self.package_prefix, self.package.name,
-                self.config.target_platform, self.config.target_arch,
-                self.package.version, package_type, ext)
+    def _get_name(self, package_type, ext=None):
+        if ext is None:
+            ext = 'tar.' + self.compress
+
+        if self.config.target_platform != Platform.WINDOWS:
+            platform = self.config.target_platform
+        elif self.config.variants.uwp:
+            platform = 'uwp'
+        elif self.config.variants.visualstudio:
+            platform = 'msvc'
+        else:
+            platform = 'mingw'
+
+        if self.config.variants.visualstudio and self.config.variants.vscrt == 'mdd':
+            platform += '+debug'
+
+        return "%s%s-%s-%s-%s%s.%s" % (self.package_prefix, self.package.name, platform,
+                self.config.target_arch, self.package.version, package_type, ext)
+
+    def _create_tarball_stripped(self, output_dir, package_type, files, force,
+                                 package_prefix):
+        tmpdir = tempfile.mkdtemp(dir=self.config.home_dir)
+
+        if hasattr(self.package, 'strip_excludes'):
+            s = strip.Strip(self.config, self.package.strip_excludes)
+        else:
+            s = strip.Strip(self.config)
+
+        for f in files:
+            orig_file = os.path.join(self.prefix, f)
+            tmp_file = os.path.join(tmpdir, f)
+            tmp_file_dir = os.path.dirname(tmp_file)
+            if not os.path.exists(tmp_file_dir):
+                os.makedirs(tmp_file_dir)
+            shutil.copy(orig_file, tmp_file, follow_symlinks=False)
+            s.strip_file(tmp_file)
+
+        prefix_restore = self.prefix
+        self.prefix = tmpdir
+        tarball = self._create_tarball(output_dir, package_type,
+                                       files, force, package_prefix)
+        self.prefix = prefix_restore
+        shutil.rmtree(tmpdir)
+
+        return tarball
 
     def _create_tarball(self, output_dir, package_type, files, force,
                         package_prefix):
@@ -84,15 +136,59 @@ class DistTarball(PackagerBase):
                 os.remove(filename)
             else:
                 raise UsageError("File %s already exists" % filename)
-
-        tar = tarfile.open(filename, "w:bz2")
-
-        for f in files:
-            filepath = os.path.join(self.prefix, f)
-            tar.add(filepath, os.path.join(package_prefix, f))
-        tar.close()
-
+        if self.config.platform == Platform.WINDOWS:
+            self._write_tar_windows(filename, package_prefix, files)
+        else:
+            self._write_tar(filename, package_prefix, files)
         return filename
+
+    def _write_tar_windows(self, filename, package_prefix, files):
+        # MSYS tar is very old and creates broken archives, so we use Python's
+        # tarfile module instead. However, tarfile's compression is very slow,
+        # so we create an uncompressed tarball and then compress it using bzip2
+        # or xz as appropriate.
+        tar_filename = os.path.splitext(filename)[0]
+        if os.path.exists(tar_filename):
+            os.remove(tar_filename)
+        try:
+            with tarfile.open(tar_filename, 'w') as tar:
+                for f in files:
+                    filepath = os.path.join(self.prefix, f)
+                    tar.add(filepath, os.path.join(package_prefix, f))
+        except OSError:
+            os.replace(tar_filename, tar_filename + '.partial')
+            raise
+        # Compress the tarball
+        compress_cmd = ['-z', '-f', tar_filename]
+        if self.compress == 'bz2':
+            compress_cmd = ['bzip2'] + compress_cmd
+        elif self.compress == 'xz':
+            compress_cmd = ['xz', '--threads', '0'] + compress_cmd
+        shell.new_call(compress_cmd)
+
+    def _write_tar(self, filename, package_prefix, files):
+        tar_cmd = ['tar', '-C', self.prefix, '-cf', filename]
+        # ensure we provide a unique list of files to tar to avoid
+        # it creating hard links/copies
+        files = sorted(set(files))
+        if package_prefix:
+            # Only transform the files (and not symbolic/hard links)
+            tar_cmd += ['--transform', 'flags=r;s|^|{}/|'.format(package_prefix)]
+        if self.compress == 'bz2':
+            # Use lbzip2 when available for parallel compression
+            if shutil.which('lbzip2'):
+                tar_cmd += ['--use-compress-program=lbzip2']
+            else:
+                tar_cmd += ['--bzip2']
+        elif self.compress == 'xz':
+            tar_cmd += ['--use-compress-program=xz --threads=0']
+        else:
+            raise AssertionError("Unknown tar compression: {}".format(self.compress))
+        try:
+            shell.new_call(tar_cmd + files)
+        except FatalError:
+            os.replace(filename, filename + '.partial')
+            raise
 
 
 class Packager(object):

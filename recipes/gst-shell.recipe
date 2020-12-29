@@ -5,13 +5,14 @@ import os
 class Recipe(recipe.Recipe):
     name = 'gst-shell'
     version = '0.1'
-    licenses = [License.LGPL]
+    licenses = [License.LGPLv2_1Plus]
     btype = BuildType.CUSTOM
     stype = SourceType.CUSTOM
+    can_msvc = True
 
     files_shell = ['bin/gst-shell', 'share/gstreamer/gst-env']
 
-    def install(self):
+    async def install(self):
         from cerbero.commands.gensdkshell import GenSdkShell
         name = self.files_shell[0]
         prefix = self.config.prefix

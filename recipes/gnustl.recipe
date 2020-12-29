@@ -7,7 +7,7 @@ from cerbero.tools.pkgconfig import PkgConfigWritter
 class Recipe(recipe.Recipe):
     name = 'gnustl'
     version = '0.1'
-    licenses = [License.LGPLv2_1]
+    licenses = [License.LGPLv2_1Plus]
     stype = SourceType.CUSTOM
     btype = BuildType.CUSTOM
     runtime_dep = True
@@ -25,7 +25,7 @@ class Recipe(recipe.Recipe):
             raise InvalidRecipeError(self, "Invalid platform")
         v = DistroVersion.get_android_api_version(self.config.target_distro_version)
 
-    def compile(self):
+    async def compile(self):
         libdir = os.path.join(self.config.prefix, 'lib')
         if not os.path.exists(libdir):
             os.makedirs(libdir)
@@ -33,11 +33,11 @@ class Recipe(recipe.Recipe):
         # Generate libraries that aren't copied from the NDK
         v = DistroVersion.get_android_api_version(self.config.target_distro_version)
         if v >= 21:
-            shell.call(" ".join([os.environ['AR'], 'rc', os.path.join(libdir, 'libandroid_support.a')]))
+            shell.new_call([self.get_env('AR'), 'rc', os.path.join(libdir, 'libandroid_support.a')], env=self.env)
         if self.config.target_arch != Architecture.ARMv7:
-            shell.call(" ".join([os.environ['AR'], 'rc', os.path.join(libdir, 'libunwind.a')]))
+            shell.new_call([self.get_env('AR'), 'rc', os.path.join(libdir, 'libunwind.a')], env=self.env)
 
-    def install(self):
+    async def install(self):
         stl_prefix = os.path.join(self.config.toolchain_prefix, 'sources',
                   'cxx-stl', 'llvm-libc++')
         if self.config.target_arch == Architecture.X86:

@@ -5,7 +5,7 @@ from cerbero.tools.libtool import LibtoolLibrary
 class Recipe(recipe.Recipe):
     name = 'webrtc-audio-processing'
     version = '0.2'
-    licenses = [License.BSD_like]
+    licenses = [{License.BSD_like: ['COPYING']}]
     btype = BuildType.MESON
     stype = SourceType.TARBALL
     url = 'https://freedesktop.org/software/pulseaudio/%(name)s/%(name)s-%(version)s.tar.xz'
@@ -68,3 +68,4 @@ class Recipe(recipe.Recipe):
         lib = LibtoolLibrary('webrtc_audio_processing', None, None, None, self.config.libdir,
                 self.config.target_platform, deps=dependency_libs)
         lib.save()
+        super().post_install()

@@ -36,11 +36,12 @@ class OSXRelocator(object):
     ID if the file is a shared library.
     '''
 
-    def __init__(self, root, lib_prefix, recursive):
+    def __init__(self, root, lib_prefix, recursive, logfile=None):
         self.root = root
         self.lib_prefix = self._fix_path(lib_prefix)
         self.recursive = recursive
         self.use_relative_paths = True
+        self.logfile = None
 
     def relocate(self):
         self.parse_dir(self.root)
@@ -54,35 +55,36 @@ class OSXRelocator(object):
     def change_id(self, object_file, id=None):
         id = id or object_file.replace(self.lib_prefix, '@rpath')
         filename = os.path.basename(object_file)
-        if not (filename.endswith('so') or filename.endswith('dylib')):
+        if not self._is_mach_o_file(filename):
             return
-        cmd = '%s -id "%s" "%s"' % (INT_CMD, id, object_file)
-        shell.call(cmd, fail=False)
+        cmd = [INT_CMD, '-id', id, object_file]
+        shell.new_call(cmd, fail=False, logfile=self.logfile)
 
     def change_libs_path(self, object_file):
         depth = len(object_file.split('/')) - len(self.root.split('/')) - 1
         p_depth = '/..' * depth
-        rpaths = ['@loader_path' + p_depth, '@executable_path' + p_depth]
+        rpaths = ['.']
+        rpaths += ['@loader_path' + p_depth, '@executable_path' + p_depth]
         rpaths += ['@loader_path' + '/../lib', '@executable_path' + '/../lib']
+        if not self._is_mach_o_file(object_file):
+            return
         if depth > 1:
             rpaths += ['@loader_path/..', '@executable_path/..']
         for p in rpaths:
-            cmd = '%s -add_rpath %s "%s"' % (INT_CMD, p, object_file)
-            shell.call(cmd, fail=False)
+            cmd = [INT_CMD, '-add_rpath', p, object_file]
+            shell.new_call(cmd, fail=False)
         for lib in self.list_shared_libraries(object_file):
             if self.lib_prefix in lib:
                 new_lib = lib.replace(self.lib_prefix, '@rpath')
-                cmd = '%s -change "%s" "%s" "%s"' % (INT_CMD, lib, new_lib,
-                                               object_file)
-                shell.call(cmd, fail=False)
+                cmd = [INT_CMD, '-change', lib, new_lib, object_file]
+                shell.new_call(cmd, fail=False, logfile=self.logfile)
 
     def change_lib_path(self, object_file, old_path, new_path):
         for lib in self.list_shared_libraries(object_file):
             if old_path in lib:
                 new_path = lib.replace(old_path, new_path)
-                cmd = '%s -change "%s" "%s" "%s"' % (INT_CMD, lib, new_path,
-                                               object_file)
-                shell.call(cmd, fail=True)
+                cmd = [INT_CMD, '-change', lib, new_path, object_path]
+                shell.new_call(cmd, fail=True, logfile=self.logfile)
 
     def parse_dir(self, dir_path, filters=None):
         for dirpath, dirnames, filenames in os.walk(dir_path):
@@ -96,8 +98,7 @@ class OSXRelocator(object):
 
     @staticmethod
     def list_shared_libraries(object_file):
-        cmd = '%s -L "%s"' % (OTOOL_CMD, object_file)
-        res = shell.check_call(cmd).split('\n')
+        res = shell.check_output([OTOOL_CMD, '-L', object_file]).splitlines()
         # We don't use the first line
         libs = res[1:]
         # Remove the first character tabulation
@@ -110,6 +111,11 @@ class OSXRelocator(object):
         if path.endswith('/'):
             return path[:-1]
         return path
+
+    def _is_mach_o_file(self, filename):
+        return os.path.splitext(filename)[1] in ['.dylib', '.so'] or \
+                shell.check_output(['file', '-bh', filename]).startswith('Mach-O')
+
 
 
 class Main(object):

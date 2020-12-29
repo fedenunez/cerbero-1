@@ -16,11 +16,12 @@
 # Free Software Foundation, Inc., 59 Temple Place - Suite 330,
 # Boston, MA 02111-1307, USA.
 
+import asyncio
 
 from cerbero.commands import Command, register_command
 from cerbero.build.cookbook import CookBook
 from cerbero.errors import FatalError
-from cerbero.utils import _, N_, ArgparseArgument
+from cerbero.utils import _, N_, ArgparseArgument, run_until_complete
 from cerbero.utils import messages as m
 
 
@@ -62,7 +63,10 @@ class Check(Command):
 
             if stepfunc:
                 try:
-                    stepfunc()
+                    if asyncio.iscoroutinefunction(stepfunc):
+                        run_until_complete(stepfunc())
+                    else:
+                        stepfunc()
                 except FatalError as e:
                     raise e
                 except Exception as ex:

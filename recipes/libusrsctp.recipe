@@ -24,50 +24,34 @@
 
 # -*- Mode: Python -*- vi:si:et:sw=4:sts=4:ts=4:syntax=python
 
-import shutil
-from cerbero.utils import shell
+from cerbero.tools.libtool import LibtoolLibrary
 
 class Recipe(recipe.Recipe):
     name = 'libusrsctp'
     version = 'master'
-    remotes = { 'origin': 'https://github.com/sctplab/usrsctp.git' };
-    commit = 'f4819e1b177f7bfdd761c147f5a649b9f1a78c06';
+    remotes = {'origin': 'https://github.com/sctplab/usrsctp.git'}
+    commit = 'f668bb69123fdbd0dd027b590536d89118964dca'
     stype = SourceType.GIT
-    autoreconf = True
-    licenses = [License.BSD_like]
-    configure_options = '--disable-debug --enable-static --enable-shared'
+    btype = BuildType.MESON
+    licenses = [{License.BSD_like: ['LICENSE.md']}]
+
+    # We do not need the socket API since we will wrap inside a DTLS packet
+    # anyway, because we use SCTP for WebRTC data channels.
+    meson_options = {'sctp_inet': 'false', 'sctp_inet6': 'false', 'sctp_build_programs': 'false'}
 
     files_libs = ['libusrsctp']
     files_devel = ['include/usrsctp.h']
 
-    patches = ['libusrsctp/0001-auto-Fix-build-for-mingw.patch']
+    def prepare(self):
+        if self.using_msvc():
+            self.library_type = LibraryType.SHARED
 
-    def extract(self):
-        super(recipe.Recipe, self).extract()
+    def post_install(self):
+        # XXX: Don't forget to keep this in sync with the library version!
+        dependency_libs=[]
 
-        for f in ['NEWS', 'README', 'AUTHORS', 'ChangeLog']:
-            print (os.path.join(self.build_dir, f))
-            shell.touch(os.path.join(self.build_dir, f), True)
-        #os.mkdir(os.path.join(self.build_dir, 'm4'))
-
-    def configure(self):
-        usrsctplib_path = os.path.join(self.build_dir, 'usrsctplib')
-        recipe_path = os.path.join(self.config.recipes_dir, self.name)
-        if self.config.target_platform == Platform.ANDROID:
-            # ifaddrs is a GNU extension that isn't available on Android
-            shutil.copy(os.path.join(recipe_path, "ifaddrs.c"),
-                        usrsctplib_path)
-            shutil.copy(os.path.join(recipe_path, "ifaddrs.h"),
-                        usrsctplib_path)
-            shell.replace(os.path.join(usrsctplib_path, 'Makefile.am'),
-                          {'sctp_os_userspace.h':
-                           'sctp_os_userspace.h ifaddrs.c ifaddrs.h'})
-        elif self.config.target_platform == Platform.IOS:
-            def copyreplacetree(src, dst):
-                if os.path.exists(dst):
-                    shutil.rmtree(dst)
-                shutil.copytree(src, dst)
-            copyreplacetree(os.path.join(recipe_path, "net"),
-                        os.path.join(usrsctplib_path, "net"))
-            self.append_env("CPPFLAGS", "-I %s" % os.path.join(usrsctplib_path, "platform"))
-        super(recipe.Recipe, self).configure()
+        libtool_la = LibtoolLibrary('usrsctp', 0, None, None, self.config.libdir,
+                                    self.config.target_platform,
+                                    deps=dependency_libs)
+        libtool_la.save()
+        super().post_install()

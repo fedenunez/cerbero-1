@@ -18,11 +18,13 @@
 
 import os
 import re
+import shlex
 import shutil
 
 from cerbero.enums import Architecture, Platform
-from cerbero.utils import shell, to_unixpath
+from cerbero.utils import shell
 from cerbero.utils import messages as m
+from cerbero.errors import FatalError
 
 
 class GenLib(object):
@@ -31,10 +33,49 @@ class GenLib(object):
     using 'gendef' to create a .def file and then libtool to create the import
     library (.lib)
     '''
-
-    DLLTOOL_TPL = '$DLLTOOL -d %s -l %s -D %s'
-    LIB_TPL = '%s /DEF:%s /OUT:%s /MACHINE:%s'
+    warned_dlltool = False
     filename = 'unknown'
+
+    def __init__(self, config, logfile):
+        self.config = config
+        self.logfile = logfile
+        self.gendef_bin = shlex.split(self.config.env['GENDEF'])
+        self.dlltool_bin = shlex.split(self.config.env['DLLTOOL'])
+
+    def _fix_broken_def_output(self, contents):
+        if self.config.target_arch != Architecture.X86:
+            return contents
+        out = ''
+        broken_entry_re = re.compile(r'([a-zA-Z_]+@[0-9]+)@[0-9]+')
+        for line in contents.split(os.linesep):
+            line = self._fix_broken_entry(line, broken_entry_re)
+            out += line + os.linesep
+        return out
+
+    def _fix_broken_entry(self, line, regex):
+        if line.startswith(';'):
+            return line
+        m = regex.match(line)
+        if not m:
+            return line
+        return m.groups()[0]
+
+    def gendef(self, dllpath, outputdir, libname):
+        defname = libname + '.def'
+        def_contents = shell.check_output(self.gendef_bin + ['-', dllpath], outputdir,
+                                          logfile=self.logfile, env=self.config.env)
+        # If the output doesn't contain a 'LIBRARY' directive, gendef errored
+        # out. However, gendef always returns 0 so we need to inspect the
+        # output and guess.
+        if 'LIBRARY' not in def_contents:
+            raise FatalError('gendef failed on {!r}\n{}'.format(dllpath, def_contents))
+        with open(os.path.join(outputdir, defname), 'w') as f:
+            f.write(self._fix_broken_def_output(def_contents))
+        return defname
+
+    def dlltool(self, defname, dllname, outputdir):
+        cmd = self.dlltool_bin + ['-d', defname, '-l', self.filename, '-D', dllname]
+        shell.new_call(cmd, outputdir, logfile=self.logfile, env=self.config.env)
 
     def create(self, libname, dllpath, platform, target_arch, outputdir):
         # foo.lib must not start with 'lib'
@@ -46,9 +87,7 @@ class GenLib(object):
         bindir, dllname = os.path.split(dllpath)
 
         # Create the .def file
-        shell.call('gendef %s' % dllpath, outputdir)
-
-        defname = dllname.replace('.dll', '.def')
+        defname = self.gendef(dllpath, outputdir, libname)
 
         # Create the import library
         lib_path, paths = self._get_lib_exe_path(target_arch, platform)
@@ -56,35 +95,31 @@ class GenLib(object):
         # Prefer LIB.exe over dlltool:
         # http://sourceware.org/bugzilla/show_bug.cgi?id=12633
         if lib_path is not None:
-            # Spaces msys and shell are a beautiful combination
-            lib_path = to_unixpath(lib_path)
-            lib_path = lib_path.replace('\\', '/')
-            lib_path = lib_path.replace('(', '\\\(').replace(')', '\\\)')
-            lib_path = lib_path.replace(' ', '\\\\ ')
             if target_arch == Architecture.X86:
                 arch = 'x86'
             else:
                 arch = 'x64'
-            old_path = os.environ['PATH']
-            os.environ['PATH'] = paths + ';' + old_path
-            shell.call(self.LIB_TPL % (lib_path, defname, self.filename, arch),
-                       outputdir)
-            os.environ['PATH'] = old_path
+            env = self.config.env.copy()
+            env['PATH'] = paths + ';' + env['PATH']
+            cmd = [lib_path, '/DEF:' + defname, '/OUT:' + self.filename, '/MACHINE:' + arch]
+            shell.new_call(cmd, outputdir, logfile=self.logfile, env=env)
         else:
-            m.warning("Using dlltool instead of lib.exe! Resulting .lib files"
-                " will have problems with Visual Studio, see "
-                " http://sourceware.org/bugzilla/show_bug.cgi?id=12633")
-            shell.call(self.DLLTOOL_TPL % (defname, self.filename, dllname),
-                       outputdir)
+            if not GenLib.warned_dlltool:
+                m.warning("Using dlltool instead of lib.exe! All generated .lib "
+                          "files will have problems with Visual Studio, see "
+                          "http://sourceware.org/bugzilla/show_bug.cgi?id=12633")
+                GenLib.warned_dlltool = True
+            self.dlltool(defname, dllname, outputdir)
         return os.path.join(outputdir, self.filename)
 
     def _get_lib_exe_path(self, target_arch, platform):
         # No Visual Studio tools while cross-compiling
         if platform != Platform.WINDOWS:
             return None, None
-        from cerbero.ide.vs.env import get_msvc_env
-        msvc_env = get_msvc_env('x86', target_arch)[0]
-        paths = msvc_env['PATH']
+        # Visual Studio not installed
+        if 'PATH' not in self.config.msvc_env_for_toolchain:
+            return None, None
+        paths = self.config.msvc_env_for_toolchain['PATH'].get()
         return shutil.which('lib', path=paths), paths
 
 class GenGnuLib(GenLib):
@@ -107,7 +142,8 @@ class GenGnuLib(GenLib):
             self.filename = 'lib{0}.dll.a'.format(libname)
         dllname = os.path.basename(dllpath)
         # Create the .def file
-        shell.call('gendef ' + dllpath, outputdir)
-        defname = dllname.replace('.dll', '.def')
-        shell.call(self.DLLTOOL_TPL % (defname, self.filename, dllname), outputdir)
+        defname = self.gendef(dllpath, outputdir, libname)
+
+        # Create the .dll.a file
+        self.dlltool(defname, dllname, outputdir)
         return os.path.join(outputdir, self.filename)

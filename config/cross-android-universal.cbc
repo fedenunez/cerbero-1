@@ -1,6 +1,7 @@
 import os
 from cerbero.config import Platform, Architecture, Distro, DistroVersion
 
+# NOTE: These all get overridden in the arch-specific cbc files
 target_platform = Platform.ANDROID
 target_distro = Distro.ANDROID
 target_distro_version = DistroVersion.ANDROID_JELLY_BEAN
@@ -14,5 +15,5 @@ universal_archs = {
             Architecture.X86_64: "cross-android-x86-64.cbc",
         }
 
-#variants = ['nodebug']
+#variants.override('nodebug')
 allow_parallel_build = True

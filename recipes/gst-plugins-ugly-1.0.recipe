@@ -4,7 +4,7 @@
 class Recipe(custom.GStreamer):
     name = 'gst-plugins-ugly-1.0'
     btype = BuildType.MESON
-    tarball_checksum = '178fa922cf54a1eb1c563e1a1b272c9b5dbf50fb331830170ddf2aeec1e8e99e'
+    tarball_checksum = 'a337a022ed472209b38cab5918dc2f4e7a6adc1f4afacd226a6345e5cb668bdb'
     meson_options = {'a52dec': 'enabled',
                      'amrnb': 'enabled',
                      'amrwbdec': 'enabled',
@@ -48,12 +48,14 @@ class Recipe(custom.GStreamer):
     files_lang = ['gst-plugins-ugly-1.0']
 
     def prepare(self):
-        if self.config.target_platform in [ Platform.ANDROID, Platform.IOS ]:
-            self.deps.remove('libdvdread')
-            self.files_plugins_dvd.remove('lib/gstreamer-1.0/libgstdvdread%(mext)s')
-            self.files_plugins_dvd_devel.remove('lib/gstreamer-1.0/libgstdvdread.la')
-            self.files_plugins_dvd_devel.remove('lib/gstreamer-1.0/libgstdvdread.a')
-            self.meson_options['dvdread'] = 'disabled'
+        if self.using_uwp() or self.config.target_platform in (Platform.ANDROID, Platform.IOS):
+            self.disable_plugin('dvdread', 'dvd', dep='libdvdread')
+
+        if self.using_uwp():
+            self.disable_plugin('a52dec', 'codecs_restricted', dep='a52dec')
+            self.disable_plugin('amrnb', 'codecs_restricted', dep='opencore-amr')
+            self.disable_plugin('amrwbdec', 'codecs_restricted', dep='opencore-amr')
+            self.disable_plugin('x264', 'codecs_restricted', dep='x264')
 
         if self.config.variants.nodebug:
             self.append_env('CFLAGS', '-DGST_LEVEL_MAX=GST_LEVEL_FIXME')

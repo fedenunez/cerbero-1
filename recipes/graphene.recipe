@@ -24,24 +24,21 @@ class Recipe(recipe.Recipe):
     name = 'graphene'
     stype = SourceType.TARBALL
     btype = BuildType.MESON
-    version = '1.8.2'
+    version = '1.10.2'
     url = 'https://github.com/ebassi/graphene/archive/{0}.tar.gz'.format(version)
-    tarball_checksum = '8c7d895536936e65c7f859f87bd14c258ac7f2c4ec999010e39e658f47c4d2ee'
-    licenses = [License.MIT]
-    # Disable NEON completely, it's broken and experimental
-    meson_options = {'arm_neon' : 'false', 'introspection' : 'false' }
-
-               # https://github.com/ebassi/graphene/pull/127
-    patches = ['graphene/0001-meson-fix-HAVE_INIT_ONCE-declaration.patch',
-               # https://github.com/ebassi/graphene/pull/128
-               'graphene/0001-Fix-implicit-conversion-error-when-compiling-with-MS.patch',
-               # https://github.com/ebassi/graphene/pull/130
-               'graphene/0001-bench-Fix-MSVC-build-error-on-32-bit-Windows.patch']
+    tarball_checksum = '87c682291fa38a131aaf9aaee17d053d7bd4ea5309d305a356619c95784b9b4d'
+    licenses = [{License.MIT: ['LICENSE.txt']}]
+    meson_options = {
+        # XXX: check whether neon support works better
+        'arm_neon' : 'false',
+        'introspection' : 'false',
+        'installed_tests': 'false',
+    }
 
     deps = ['glib']
 
     files_libs = ['libgraphene-1.0']
-    files_typelibs = ['Graphene-1.0']
+#    files_typelibs = ['Graphene-1.0']
 
     files_devel = [
         'include/graphene-1.0',
@@ -84,8 +81,8 @@ class Recipe(recipe.Recipe):
                                      'include', arch)
             if not os.path.exists(arch_dir):
                 os.makedirs(arch_dir)
-            shutil.copyfile(os.path.join(self.meson_dir, 'src', 'graphene-config.h'),
-                        os.path.join(arch_dir, 'graphene-config.h'))
+            shutil.copyfile(os.path.join(self.meson_dir, 'include', 'graphene-config.h'),
+                            os.path.join(arch_dir, 'graphene-config.h'))
             with open(os.path.join(self.config.prefix, 'lib', 'graphene-1.0',
                                    'include', 'graphene-config.h'), 'w+') as f:
                 f.write(GRAPHENE_CONFIG_UNVERSAL)
@@ -93,3 +90,4 @@ class Recipe(recipe.Recipe):
         lib = LibtoolLibrary('graphene-1.0', None, None, None, self.config.libdir,
                 self.config.target_platform, deps=['gobject-2.0', '-lm', '-pthread'])
         lib.save()
+        super().post_install()

@@ -1,9 +1,11 @@
 # -*- Mode: Python -*- vi:si:et:sw=4:sts=4:ts=4:syntax=python
 
+from pathlib import Path
+
 class Recipe(recipe.Recipe):
     name = 'librsvg'
     version = '2.40.20'
-    licenses = [License.LGPLv2]
+    licenses = [License.LGPLv2Plus]
     deps = ['libcroco', 'gdk-pixbuf', 'pango', 'cairo']
     autoreconf = True
     autoreconf_sh = 'mkdir -p m4 && autoreconf -fiv'
@@ -13,13 +15,14 @@ class Recipe(recipe.Recipe):
 
     files_libs = ['librsvg-2']
     files_bins = ['rsvg-convert']
-    files_loader = []
+    licenses_bins = [License.GPLv2Plus]
+    files_loader = ['lib/gdk-pixbuf-2.0/2.10.0/loaders/libpixbufloader-svg%(mext)s']
     files_devel = ['include/librsvg-2.0/librsvg/*.h',
                    'lib/pkgconfig/librsvg-2.0.pc',
                    'lib/librsvg-2.a', 'lib/librsvg-2.la']
     files_typelibs = ['Rsvg-2.0']
     # GTK3 support just builds rsvg-view-3, which is useless for Cerbero
-    configure_options = ' --disable-pixbuf-loader --without-gtk3 '
+    configure_options = ' --without-gtk3 '
 
     patches = ['librsvg/option-enable-disable-gtk.patch',
                'librsvg/0001-Use-ACLOCAL_FLAGS.patch',
@@ -28,3 +31,16 @@ class Recipe(recipe.Recipe):
     def prepare(self):
         if self.config.target_platform in [Platform.DARWIN, Platform.IOS]:
             self.configure_options += ' --disable-Bsymbolic'
+        # Fails on cross-ios and cross-win32
+        if self.config.cross_compiling():
+            self.configure_options += ' --disable-pixbuf-loader'
+
+    async def compile(self):
+        # glib-mkenums has #!/usr/bin/env python3, which looks for `python3`,
+        # but on Windows Python 3 is `python.exe`. Meson already handles this
+        # for us, but Autotools can't.
+        # NOTE: Remove this when the recipe is ported to Meson.
+        if self.config.platform == Platform.WINDOWS:
+            with (Path(self.build_dir) / 'python3').open('w') as f:
+                f.write('#!/bin/sh\n"{}" "$@"'.format(self.config.python_exe))
+        await super().compile()

@@ -3,17 +3,15 @@
 
 class Recipe(recipe.Recipe):
     name = 'freetype'
-    version = '2.9'
+    version = '2.10.4'
     stype = SourceType.TARBALL
-    url = 'savannah://.tar.bz2'
-    tarball_checksum = 'e6ffba3c8cef93f557d1f767d7bc3dee860ac7a3aaff588a521e081bc36f4c8a'
-    licenses = [License.FreeType]
+    url = 'savannah://.tar.xz'
+    tarball_checksum = '86a854d8905b19698bbc8f23b860bc104246ce4854dcea8e3b0fb21284f75784'
+    licenses = [{License.FreeType: ['docs/LICENSE.TXT']}, License.GPLv2Plus]
     configure_tpl = "%(config-sh)s --prefix=%(prefix)s --libdir=%(libdir)s --with-harfbuzz=no"
     deps = ['zlib', 'bzip2', 'libpng']
-    patches = ['freetype/0001-pngshim-Workaround-buggy-mingw-compiler.patch']
 
     files_libs = ['libfreetype']
-    files_devel = ['bin/freetype-config',
-                   'lib/pkgconfig/freetype2.pc',
+    files_devel = ['lib/pkgconfig/freetype2.pc',
                    'include/freetype2',
                    'share/aclocal/freetype2.m4']

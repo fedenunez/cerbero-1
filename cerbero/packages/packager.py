@@ -18,7 +18,7 @@
 
 from cerbero.config import Distro, Platform
 from cerbero.errors import FatalError
-from cerbero.utils import  _
+from cerbero.utils import  _, get_wix_prefix
 from cerbero.utils import  messages as m
 
 
@@ -46,9 +46,19 @@ class Packager (object):
                 "version %s, using generic packager for distro %s" % (v, d)))
             v = None
 
-        if (d == Distro.WINDOWS and config.platform == Platform.LINUX):
-            m.warning("Cross-compiling for Windows, overriding Packager")
+        if d == Distro.DEBIAN:
+            m.warning('Creation of Debian packages is currently broken, please see '
+                      'https://gitlab.freedesktop.org/gstreamer/cerbero/issues/56\n'
+                      'Creating tarballs instead...')
             d = Distro.NONE
+            v = None
+
+        if d == Distro.WINDOWS and config.cross_compiling():
+            try:
+                get_wix_prefix()
+            except:
+                m.warning("Cross-compiling for Windows and WIX not found, overriding Packager")
+                d = Distro.NONE
 
         return _packagers[d][v](config, package, store)
 

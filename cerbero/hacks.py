@@ -18,6 +18,7 @@
 
 import os
 import sys
+import pathlib
 
 
 ### XML Hacks ###
@@ -57,13 +58,14 @@ etree.ElementTree.write = write
 ### Windows Hacks ###
 
 # we don't want backlashes in paths as it breaks shell commands
+oldjoin = os.path.join
 oldexpanduser = os.path.expanduser
 oldabspath = os.path.abspath
 oldrealpath = os.path.realpath
 
 
 def join(*args):
-    return '/'.join(args)
+    return pathlib.PurePath(oldjoin(*args)).as_posix()
 
 
 def expanduser(path):
@@ -94,7 +96,7 @@ if sys.platform.startswith('win'):
 import stat
 import shutil
 from shutil import rmtree as shutil_rmtree
-from cerbero.utils.shell import call as shell_call
+from cerbero.utils.shell import new_call as shell_call
 
 def rmtree(path, ignore_errors=False, onerror=None):
     '''
@@ -127,24 +129,6 @@ def rmtree(path, ignore_errors=False, onerror=None):
 
 shutil.rmtree = rmtree
 
-### OS X Hacks ###
-
-# use cURL to download instead of wget
-
-import cerbero.utils.shell
-# wget shipped with msys fails with an SSL error on github URLs
-# https://githubengineering.com/crypto-removal-notice/
-# curl on Windows (if provided externally) is often badly-configured and fails
-# to download over https, so just always use urllib2 on Windows.
-if sys.platform.startswith('win'):
-    cerbero.utils.shell.download = cerbero.utils.shell.download_urllib2
-elif cerbero.utils.shell.which('wget'):
-    cerbero.utils.shell.download = cerbero.utils.shell.download_wget
-elif cerbero.utils.shell.which('curl'):
-    cerbero.utils.shell.download = cerbero.utils.shell.download_curl
-else:
-    # Fallback. TODO: make this the default and remove curl/wget dependency
-    cerbero.utils.shell.download = cerbero.utils.shell.download_urllib2
 
 ### Python ZipFile module bug ###
 # zipfile.ZipFile.extractall() does not preserve permissions
@@ -166,3 +150,40 @@ class ZipFile(zipfile_ZipFile):
         return path
 
 zipfile.ZipFile = ZipFile
+
+### Python os.symlink bug ###
+# os.symlink doesn't convert / to \ and writes out an invalid path entry
+# instead. This breaks extracting of tarballs with symlinks, such as our mingw
+# toolchain tarball.
+# https://bugs.python.org/issue13702#msg218029
+
+from pathlib import WindowsPath
+from os import symlink as os_symlink
+
+def symlink(src, dst, **kwargs):
+    src = str(WindowsPath(src))
+    os_symlink(src, dst, **kwargs)
+
+if sys.platform.startswith('win'):
+    os.symlink = symlink
+
+### Python tarfile bug ###
+# tarfile does not correctly handle the case when it needs to overwrite an
+# existing symlink, since os.symlink returns FileExistsError (subclass of
+# OSError) and tarfile.makelink() thinks it's a permissions issue (it checks
+# for OSError). So we need to handle that too by checking whether `dst` is
+# a symlink and deleting it in that case.
+
+import tarfile
+
+def symlink_overwrite(src, dst, **kwargs):
+    # Allow overwriting symlinks
+    try:
+        if os.path.islink(dst):
+            os.remove(dst)
+    except OSError:
+        pass
+    symlink(src, dst, **kwargs)
+
+if sys.platform.startswith('win'):
+    tarfile.os.symlink = symlink_overwrite

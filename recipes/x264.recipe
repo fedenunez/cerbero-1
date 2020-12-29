@@ -3,9 +3,9 @@ from cerbero.tools.libtool import LibtoolLibrary
 
 
 class Recipe(recipe.Recipe):
-    version = '20161218-2245'
+    version = '20191217-2245'
     name = 'x264'
-    licenses = [License.GPL]
+    licenses = [License.GPLv2Plus]
     stype = SourceType.TARBALL
     configure_tpl = "%(config-sh)s --prefix=%(prefix)s "\
                     "--libdir=%(libdir)s"
@@ -13,7 +13,9 @@ class Recipe(recipe.Recipe):
                         '--disable-strip --disable-lavf'
     url = 'https://download.videolan.org/pub/x264/snapshots/x264-snapshot-%(version)s-stable.tar.bz2'
     tarball_dirname= 'x264-snapshot-%(version)s-stable'
-    tarball_checksum = 'd4d4fb146fbe64efb0f02d149118a0e93f575417011e4ff898a5079d548b9950'
+    tarball_checksum = 'b2495c8f2930167d470994b1ce02b0f4bfb24b3317ba36ba7f112e9809264160'
+
+    patches = ['x264/0001-configure-Force-pkgconfig-file-to-have-relative-valu.patch']
 
     files_libs = ['libx264']
     files_bins = ['x264']
@@ -24,29 +26,21 @@ class Recipe(recipe.Recipe):
         # clang x86-32 fails at generating proper asm PIC code
         # See bug https://bugzilla.gnome.org/show_bug.cgi?id=727079
         enable_asm = True
-        AS = ['yasm']
+        AS = ['nasm']
 
         arch = self.config.target_arch
         if self.config.target_arch == Architecture.X86:
             arch = 'i686'
-        if self.config.target_platform == Platform.DARWIN:
-            if self.config.target_arch == Architecture.X86:
-                AS = ['yasm', '-O2', '-f', 'macho', '-DPREFIX']
-                enable_asm = False
-        if self.config.target_platform == Platform.WINDOWS:
-            self.configure_options += ' --enable-win32thread'
-        if self.config.target_arch == Architecture.ARM:
-            # FIXME : Is disabling asm on ARM (< v7) still needed ?
-            enable_asm = False
-        elif Architecture.is_arm(self.config.target_arch):
-            if 'CC' in os.environ:
-                AS = [os.environ['CC']]
+        if Architecture.is_arm(self.config.target_arch):
+            cc = self.get_env('CC')
+            if cc:
+                AS = [cc]
             else:
                 AS = []
         if self.config.target_platform == Platform.IOS:
             if Architecture.is_arm(self.config.target_arch):
                 # x264 ships its own gas-preprocessor.pl
-                AS = ['tools/' + os.environ['GAS']]
+                AS = ['tools/' + self.get_env('GAS')]
                 self.patches = ['x264/0001-Disable-fembed-bitcode-incompatible-argument.patch']
             elif self.config.target_arch == Architecture.X86:
                 enable_asm = False
@@ -74,3 +68,4 @@ class Recipe(recipe.Recipe):
         libtool_la = LibtoolLibrary('x264', 148, None, None, self.config.libdir,
                 self.config.target_platform)
         libtool_la.save()
+        super().post_install()

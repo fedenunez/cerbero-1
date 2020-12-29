@@ -23,8 +23,8 @@ import time
 import imp
 import traceback
 
-from cerbero.config import CONFIG_DIR, Platform, Architecture, Distro,\
-    DistroVersion, License
+from cerbero.config import USER_CONFIG_DIR, Platform, Architecture, Distro,\
+    DistroVersion, License, LibraryType
 from cerbero.build.build import BuildType
 from cerbero.build.source import SourceType
 from cerbero.errors import FatalError, RecipeNotFoundError, InvalidRecipeError
@@ -35,7 +35,7 @@ from cerbero.build import recipe as crecipe
 
 
 COOKBOOK_NAME = 'cookbook'
-COOKBOOK_FILE = os.path.join(CONFIG_DIR, COOKBOOK_NAME)
+USER_COOKBOOK_FILE = os.path.join(USER_CONFIG_DIR, COOKBOOK_NAME)
 
 
 class RecipeStatus (object):
@@ -59,7 +59,7 @@ class RecipeStatus (object):
     '''
 
     def __init__(self, filepath, steps=[], needs_build=True,
-                 mtime=time.time(), built_version=None, file_hash=0):
+                 mtime=time.time(), built_version='', file_hash=0):
         self.steps = steps
         self.needs_build = needs_build
         self.mtime = mtime
@@ -72,7 +72,8 @@ class RecipeStatus (object):
         self.mtime = time.time()
 
     def __repr__(self):
-        return "Steps: %r Needs Build: %r" % (self.steps, self.needs_build)
+        return "steps: %r, needs_build: %r, mtime: %r, filepath: %r, built_version: %r, file_hash: %r" % \
+            (self.steps, self.needs_build, self.mtime, self.filepath, self.built_version, self.file_hash.hex())
 
 
 class CookBook (object):
@@ -88,7 +89,7 @@ class CookBook (object):
 
     RECIPE_EXT = '.recipe'
 
-    def __init__(self, config, load=True, offline=False):
+    def __init__(self, config, load=True, offline=False, skip_errors=False):
         self.offline = offline
         self.set_config(config)
         self.recipes = {}  # recipe_name -> recipe
@@ -103,7 +104,7 @@ class CookBook (object):
         if not os.path.exists(config.recipes_dir):
             raise FatalError(_("Recipes dir %s not found") %
                              config.recipes_dir)
-        self.update()
+        self.update(skip_errors)
 
     def set_config(self, config):
         '''
@@ -135,11 +136,11 @@ class CookBook (object):
         '''
         self.status = status
 
-    def update(self):
+    def update(self, skip_errors):
         '''
         Reloads the recipes list and updates the cookbook
         '''
-        self._load_recipes()
+        self._load_recipes(skip_errors)
         self._load_manifest()
         self.save()
 
@@ -277,6 +278,34 @@ class CookBook (object):
         recipe = self.get_recipe(recipe_name)
         return [r for r in list(self.recipes.values()) if recipe.name in r.deps]
 
+    def get_closest_recipe (self, name):
+        '''
+        Gets the closest recipe name from name in
+        the cookbook if only one recipe name
+        matches.
+
+        @param recipe_name: name of the recipe
+        @type recipe_name: str
+        @return: the closest recipe name
+        @rtype: str
+        '''
+        # If there's an exact match, just return it
+        if name in self.recipes:
+            return name
+
+        recipe_name = ''
+        for r in self.recipes:
+            if name in r:
+                if recipe_name:
+                    m.message("Name '%s' matches two or more recipes: [%s, %s]" % (name, r, recipe_name))
+                    return ''
+                recipe_name = r
+
+        if recipe_name:
+            m.message("Found a recipe %s matching name %s" % (recipe_name, name))
+
+        return recipe_name
+
     def _runtime_deps (self):
         return [x.name for x in list(self.recipes.values()) if x.runtime_dep]
 
@@ -284,7 +313,7 @@ class CookBook (object):
         if config.cache_file is not None:
             return os.path.join(config.home_dir, config.cache_file)
         else:
-            return COOKBOOK_FILE
+            return USER_COOKBOOK_FILE
 
     def _restore_cache(self):
         try:
@@ -338,12 +367,12 @@ class CookBook (object):
                     file_hash=recipe.get_checksum())
         return self.status[recipe_name]
 
-    def _load_recipes(self):
+    def _load_recipes(self, skip_errors):
         self.recipes = {}
         recipes = defaultdict(dict)
         recipes_repos = self._config.get_recipes_repos()
         for reponame, (repodir, priority) in recipes_repos.items():
-            recipes[int(priority)].update(self._load_recipes_from_dir(repodir))
+            recipes[int(priority)].update(self._load_recipes_from_dir(repodir, skip_errors))
         # Add recipes by asceding pripority
         for key in sorted(recipes.keys()):
             self.recipes.update(recipes[key])
@@ -381,23 +410,26 @@ class CookBook (object):
                     else:
                         self.reset_recipe_status(recipe.name)
 
-    def _load_recipes_from_dir(self, repo):
+    def _load_recipes_from_dir(self, repo, skip_errors):
         recipes = {}
         recipes_files = shell.find_files('*%s' % self.RECIPE_EXT, repo)
         recipes_files.extend(shell.find_files('*/*%s' % self.RECIPE_EXT, repo))
-        try:
-            custom = None
-            m_path = os.path.join(repo, 'custom.py')
-            if os.path.exists(m_path):
-                custom = imp.load_source('custom', m_path)
-        except Exception:
-            custom = None
+        custom = None
+        # If a manifest is being used or if recipes_commits is defined, disable
+        # usage of tarballs when tagged for release. We need to do this before
+        # `custom.py` is loaded, so we can't set it on the module afterwards.
+        # We need to set it on the parent class.
+        if self._config.manifest or self._config.recipes_commits:
+            crecipe.Recipe._using_manifest_force_git = True
+        m_path = os.path.join(repo, 'custom.py')
+        if os.path.exists(m_path):
+            custom = imp.load_source('custom', m_path)
         for f in recipes_files:
-            # Try to load the custom.py module located in the recipes dir
-            # which can contain private classes to extend cerbero's recipes
-            # and reuse them in our private repository
+            # Try to load recipes with the custom.py module located in the
+            # recipes dir which can contain private classes and methods with
+            # common code for gstreamer recipes.
             try:
-                recipes_from_file = self._load_recipes_from_file(f, custom)
+                recipes_from_file = self._load_recipes_from_file(f, skip_errors, custom)
             except RecipeNotFoundError:
                 m.warning(_("Could not found a valid recipe in %s") % f)
             if recipes_from_file is None:
@@ -406,7 +438,7 @@ class CookBook (object):
                 recipes[recipe.name] = recipe
         return recipes
 
-    def _load_recipes_from_file(self, filepath, custom=None):
+    def _load_recipes_from_file(self, filepath, skip_errors, custom):
         recipes = []
         d = {'Platform': Platform, 'Architecture': Architecture,
                 'BuildType': BuildType, 'SourceType': SourceType,
@@ -415,7 +447,8 @@ class CookBook (object):
                 'BuildSteps': crecipe.BuildSteps,
                 'InvalidRecipeError': InvalidRecipeError,
                 'FatalError': FatalError,
-                'custom': custom, '_': _, 'shell': shell}
+                'custom': custom, '_': _, 'shell': shell,
+                'LibraryType' : LibraryType}
         d_keys = set(list(d.keys()))
         try:
             new_d = d.copy ()
@@ -426,7 +459,7 @@ class CookBook (object):
             for recipe_cls_key in [x for x in diff_keys if self._is_recipe_class(new_d[x])]:
                 if self._config.target_arch != Architecture.UNIVERSAL:
                     recipe = self._load_recipe_from_class(
-                        new_d[recipe_cls_key], self._config, filepath, custom)
+                        new_d[recipe_cls_key], self._config, filepath)
                 else:
                     recipe = self._load_universal_recipe(d, new_d[recipe_cls_key],
                         recipe_cls_key, filepath)
@@ -434,8 +467,9 @@ class CookBook (object):
                 if recipe is not None:
                     recipes.append(recipe)
         except Exception:
-            m.warning("Error loading recipe in file %s" % (filepath))
-            print(traceback.format_exc())
+            if not skip_errors:
+                m.warning("Error loading recipe in file %s" % (filepath))
+                print(traceback.format_exc())
         return recipes
 
     def _is_recipe_class(self, cls):
@@ -446,16 +480,15 @@ class CookBook (object):
             issubclass (cls, crecipe.Recipe) and \
             cls.__module__ == 'builtins'
 
-    def _load_recipe_from_class(self, recipe_cls, config, filepath, setup_env=False):
+    def _load_recipe_from_class(self, recipe_cls, config, filepath):
         try:
-            r = recipe_cls(config)
+            config.do_setup_env()
+            r = recipe_cls(config, config.env.copy())
             r.__file__ = os.path.abspath(filepath)
-            if setup_env:
-                config.do_setup_env()
             r.prepare()
             return r
         except InvalidRecipeError as e:
-            self._invalid_recipes[r.name] = e
+            self._invalid_recipes[recipe_cls.name] = e
 
     def _load_universal_recipe(self, globals_dict, recipe_cls,
             recipe_cls_key, filepath, custom=None):
@@ -465,9 +498,7 @@ class CookBook (object):
             recipe = crecipe.UniversalRecipe(self._config)
         for c in list(self._config.arch_config.keys()):
             conf = self._config.arch_config[c]
-            if self._config.target_platform not in [Platform.IOS,
-                    Platform.DARWIN]:
-                conf.prefix = os.path.join(self._config.prefix, c)
+            conf.prefix = os.path.join(self._config.prefix, c)
             # For univeral recipes, we need to parse again the recipe file.
             # Otherwise, class variables with mutable types like the "deps"
             # dictionary are reused in new instances
@@ -475,7 +506,7 @@ class CookBook (object):
                 parsed_dict = dict(globals_dict)
                 parse_file(filepath, parsed_dict)
                 recipe_cls = parsed_dict[recipe_cls_key]
-            r = self._load_recipe_from_class(recipe_cls, conf, filepath, True)
+            r = self._load_recipe_from_class(recipe_cls, conf, filepath)
             if r is not None:
                 recipe.add_recipe(r)
             recipe_cls = None

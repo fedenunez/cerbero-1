@@ -126,7 +126,7 @@ class OSXPackage(PackagerBase, FrameworkHeadersMixin):
         self.install_dir = install_dir or self.package.get_install_dir()
         self.version = version or self.package.version
         self.sdk_version = sdk_version or self.version
-        self.include_dirs = include_dirs or PkgConfig.list_all_include_dirs()
+        self.include_dirs = include_dirs or PkgConfig.list_all_include_dirs(env=self.config.env)
 
         # create the runtime package
         try:
@@ -255,7 +255,7 @@ class ProductPackage(PackagerBase):
         return paths
 
     def _prepare_pack(self):
-        self.include_dirs = PkgConfig.list_all_include_dirs()
+        self.include_dirs = PkgConfig.list_all_include_dirs(env=self.config.env)
         self.tmp = tempfile.mkdtemp()
         self.fw_path = self.tmp
 
@@ -343,8 +343,8 @@ class ProductPackage(PackagerBase):
             for p in paths:
                 shutil.copy(p, workdir)
             # Create Disk Image
-            cmd = 'hdiutil create %s -ov -srcfolder %s' % (dmg_file, workdir)
-            shell.call(cmd)
+            cmd = ['hdiutil', 'create', dmg_file, '-ov', '-srcfolder', workdir]
+            shell.new_call(cmd)
         finally:
             shutil.rmtree(workdir)
 
@@ -418,7 +418,7 @@ class ApplicationPackage(PackagerBase):
     def _add_applications_link(self):
         # Create link to /Applications
         applications_link = os.path.join(self.approot, 'Applications')
-        shell.call('ln -s /Applications %s' % applications_link)
+        shell.symlink('/Applications', applications_link)
 
     def _package_name(self, suffix):
         return '%s-%s-%s%s' % (self.package.name, self.package.version,
@@ -464,9 +464,8 @@ class ApplicationPackage(PackagerBase):
         dmg_file = os.path.join(self.output_dir, '%s-%s-%s.dmg' % (
             self.package.app_name, self.package.version, self.config.target_arch))
         # Create Disk Image
-        cmd = 'hdiutil create %s -volname %s -ov -srcfolder %s' % \
-                (dmg_file, self.package.app_name, self.approot)
-        shell.call(cmd)
+        cmd = ['hdiutil', 'create', dmg_file, '-volname', self.package.app_name, '-ov', '-srcfolder', self.approot]
+        shell.new_call(cmd)
         return dmg_file
 
 
@@ -534,7 +533,10 @@ class IOSPackage(ProductPackage, FrameworkHeadersMixin):
             out_dir = os.path.split(out_path)[0]
             if not os.path.exists(out_dir):
                 os.makedirs(out_dir)
-            shutil.copy(f, out_path)
+            if os.path.isdir(f):
+                shell.copy_dir (f, out_path)
+            else:
+                shutil.copy(f, out_path)
 
     def _copy_templates(self, files):
         templates_prefix = 'share/xcode/templates/ios'
@@ -571,8 +573,8 @@ class IOSPackage(ProductPackage, FrameworkHeadersMixin):
         # Get the list of static libraries
         static_files = [x for x in files if x.endswith('.a')]
 
-        fwlib = StaticFrameworkLibrary(libname, libname, static_files,
-            self.config.target_arch)
+        fwlib = StaticFrameworkLibrary(self.config.ios_min_version, self.config.target_distro,
+            libname, libname, static_files, self.config.target_arch, env=self.config.env)
         fwlib.use_pkgconfig = False
         if self.config.target_arch == Architecture.UNIVERSAL:
             fwlib.universal_archs = self.config.universal_archs
@@ -593,9 +595,8 @@ class IOSPackage(ProductPackage, FrameworkHeadersMixin):
         shutil.move(pkg_path, dmg_dir)
 
         # Create Disk Image
-        cmd = 'hdiutil create %s -volname %s -ov -srcfolder %s' % \
-            (dmg_file, self.package.name, dmg_dir)
-        shell.call(cmd)
+        cmd = ['hdiutil', 'create', dmg_file, '-volname', self.package.name, '-ov', '-srcfolder', dmg_dir]
+        shell.new_call(cmd)
         return dmg_file
 
 class Packager(object):

@@ -21,50 +21,51 @@ import time
 import shutil
 
 from cerbero.config import Platform
-from cerbero.utils import shell
+from cerbero.utils import shell, run_until_complete
 from cerbero.errors import FatalError
 
 
 GIT = 'git'
 
 
-def ensure_user_is_set(git_dir):
+def ensure_user_is_set(git_dir, logfile=None):
     # Set the user configuration for this repository so that Cerbero never warns
     # about it or errors out (it errors out with git-for-windows)
     try:
-      shell.call('%s config user.email' % GIT)
+        shell.new_call([GIT, 'config', 'user.email'], logfile=logfile)
     except FatalError:
-      shell.call('%s config user.email "cerbero@gstreamer.freedesktop.org"' %
-                 GIT, git_dir)
+        shell.new_call([GIT, 'config', 'user.email', 'cerbero@gstreamer.freedesktop.org'],
+                   git_dir, logfile=logfile)
 
     try:
-      shell.call('%s config user.name' % GIT)
+        shell.new_call([GIT, 'config', 'user.name'], logfile=logfile)
     except FatalError:
-      shell.call('%s config user.name "Cerbero Build System"' % GIT, git_dir)
+        shell.new_call([GIT, 'config', 'user.name', 'Cerbero Build System'],
+                   git_dir, logfile=logfile)
 
-def init(git_dir):
+def init(git_dir, logfile=None):
     '''
     Initialize a git repository with 'git init'
 
     @param git_dir: path of the git repository
     @type git_dir: str
     '''
-    shell.call('mkdir -p %s' % git_dir)
-    shell.call('%s init' % GIT, git_dir)
-    ensure_user_is_set(git_dir)
+    os.makedirs(git_dir, exist_ok=True)
+    shell.new_call([GIT, 'init'], git_dir, logfile=logfile)
+    ensure_user_is_set(git_dir, logfile=logfile)
 
 
-def clean(git_dir):
+def clean(git_dir, logfile=None):
     '''
     Clean a git respository with clean -dfx
 
     @param git_dir: path of the git repository
     @type git_dir: str
     '''
-    return shell.call('%s clean -dfx' % GIT, git_dir)
+    return shell.new_call([GIT, 'clean', '-dfx'], git_dir, logfile=logfile)
 
 
-def list_tags(git_dir, fail=True):
+def list_tags(git_dir):
     '''
     List all tags
 
@@ -75,14 +76,10 @@ def list_tags(git_dir, fail=True):
     @return: list of tag names (str)
     @rtype: list
     '''
-    tags = shell.check_call('%s tag -l' % GIT, git_dir, fail=fail)
-    tags = tags.strip()
-    if tags:
-        tags = tags.split('\n')
-    return tags
+    return shell.check_output([GIT, 'tag', '-l'], cmd_dir=git_dir).strip().splitlines()
 
 
-def create_tag(git_dir, tagname, tagdescription, commit, fail=True):
+def create_tag(git_dir, tagname, tagdescription, commit, logfile=None):
     '''
     Create a tag using commit
 
@@ -98,12 +95,13 @@ def create_tag(git_dir, tagname, tagdescription, commit, fail=True):
     @type fail: false
     '''
 
-    shell.call('%s tag -s %s -m "%s" %s' %
-               (GIT, tagname, tagdescription, commit), git_dir, fail=fail)
-    return shell.call('%s push origin %s' % (GIT, tagname), git_dir, fail=fail)
+    shell.new_call([GIT, 'tag', '-s', tagname, '-m', tagdescription, commit],
+                   cmd_dir=git_dir, logfile=logfile)
+    return shell.new_call([GIT, 'push', 'origin', tagname], cmd_dir=git_dir,
+                          logfile=logfile)
 
 
-def delete_tag(git_dir, tagname, fail=True):
+def delete_tag(git_dir, tagname, logfile=None):
     '''
     Delete a tag
 
@@ -114,10 +112,10 @@ def delete_tag(git_dir, tagname, fail=True):
     @param fail: raise an error if the command failed
     @type fail: false
     '''
-    return shell.call('%s tag -d %s' % (GIT, tagname), git_dir, fail=fail)
+    return shell.new_call([GIT, '-d', tagname], cmd_dir=git_dir, logfile=logfile)
 
 
-def fetch(git_dir, fail=True):
+async def fetch(git_dir, fail=True, logfile=None):
     '''
     Fetch all refs from all the remotes
 
@@ -126,11 +124,22 @@ def fetch(git_dir, fail=True):
     @param fail: raise an error if the command failed
     @type fail: false
     '''
-    return shell.call('%s fetch --all' % GIT, git_dir, fail=fail)
+    # git 1.9 introduced the possibility to fetch both branches and tags at the
+    # same time when using --tags: https://stackoverflow.com/a/20608181.
+    # centOS 7 ships with git 1.8.3.1, hence for old git versions, we need to
+    # run two separate commands.
+    cmd = [GIT, 'fetch', '--all']
+    ret = await shell.async_call(cmd, cmd_dir=git_dir, fail=fail, logfile=logfile, cpu_bound=False)
+    if ret != 0:
+        return ret
+    cmd.append('--tags')
+    # To avoid "would clobber existing tag" error
+    cmd.append('-f')
+    return await shell.async_call(cmd, cmd_dir=git_dir, fail=fail, logfile=logfile, cpu_bound=False)
 
-def submodules_update(git_dir, src_dir=None, fail=True, offline=False):
+async def submodules_update(git_dir, src_dir=None, fail=True, offline=False, logfile=None):
     '''
-    Update somdules from local directory
+    Update submodules asynchronously from local directory
 
     @param git_dir: path of the git repository
     @type git_dir: str
@@ -142,29 +151,32 @@ def submodules_update(git_dir, src_dir=None, fail=True, offline=False):
     @type offline: false
     '''
     if src_dir:
-        config = shell.check_call('%s config --file=.gitmodules --list' % GIT,
-                                  git_dir)
-        config_array = [s.split('=', 1) for s in config.split('\n')]
+        config = shell.check_output([GIT, 'config', '--file=.gitmodules', '--list'],
+                                    fail=False, cmd_dir=git_dir, logfile=logfile)
+        config_array = [s.split('=', 1) for s in config.splitlines()]
         for c in config_array:
             if c[0].startswith('submodule.') and c[0].endswith('.path'):
                 submodule = c[0][len('submodule.'):-len('.path')]
-                shell.call("%s config --file=.gitmodules submodule.%s.url %s" %
-                           (GIT, submodule, os.path.join(src_dir, c[1])),
-                           git_dir)
-    shell.call("%s submodule init" % GIT, git_dir)
+                shell.new_call([GIT, 'config', '--file=.gitmodules', 'submodule.{}.url'.format(submodule),
+                                os.path.join(src_dir, c[1])], cmd_dir=git_dir, logfile=logfile)
+    shell.new_call([GIT, 'submodule', 'init'], cmd_dir=git_dir, logfile=logfile)
     if src_dir or not offline:
-        shell.call("%s submodule sync" % GIT, git_dir)
-        shell.call("%s submodule update" % GIT, git_dir, fail=fail)
+        await shell.async_call([GIT, 'submodule', 'sync'], cmd_dir=git_dir, logfile=logfile,
+                               cpu_bound=False)
+        await shell.async_call([GIT, 'submodule', 'update'], cmd_dir=git_dir, fail=fail,
+                               logfile=logfile, cpu_bound=False)
     else:
-        shell.call("%s submodule update --no-fetch" % GIT, git_dir, fail=fail)
+        await shell.async_call([GIT, 'submodule', 'update', '--no-fetch'], cmd_dir=git_dir,
+                               fail=fail, logfile=logfile, cpu_bound=False)
     if src_dir:
         for c in config_array:
             if c[0].startswith('submodule.') and c[0].endswith('.url'):
-                shell.call("%s config --file=.gitmodules %s  %s" %
-                           (GIT, c[0], c[1]), git_dir)
-        shell.call("%s submodule sync" % GIT, git_dir)
+                shell.new_call([GIT, 'config', '--file=.gitmodules', c[0], c[1]],
+                               cmd_dir=git_dir, logfile=logfile)
+        await shell.async_call([GIT, 'submodule', 'sync'], cmd_dir=git_dir, logfile=logfile,
+                               cpu_bound=False)
 
-def checkout(git_dir, commit):
+async def checkout(git_dir, commit, logfile=None):
     '''
     Reset a git repository to a given commit
 
@@ -173,10 +185,11 @@ def checkout(git_dir, commit):
     @param commit: the commit to checkout
     @type commit: str
     '''
-    return shell.call('%s reset --hard %s' % (GIT, commit), git_dir)
+    cmd = [GIT, 'reset', '--hard', commit]
+    return await shell.async_call(cmd, git_dir, logfile=logfile, cpu_bound=False)
 
 
-def get_hash(git_dir, commit):
+def get_hash(git_dir, commit, logfile=None):
     '''
     Get a commit hash from a valid commit.
     Can be used to check if a commit exists
@@ -191,11 +204,11 @@ def get_hash(git_dir, commit):
         # can get called from built_version() when the directory isn't git.
         # Return a fixed string + unix time to trigger a full fetch.
         return 'not-git-' + str(time.time())
-    return shell.check_call('%s rev-parse %s' %
-                            (GIT, commit), git_dir).rstrip()
+    return shell.check_output([GIT, 'rev-parse', commit], cmd_dir=git_dir,
+                              fail=False, quiet=True, logfile=logfile).rstrip()
 
 
-def local_checkout(git_dir, local_git_dir, commit):
+async def local_checkout(git_dir, local_git_dir, commit, logfile=None):
     '''
     Clone a repository for a given commit in a different location
 
@@ -206,19 +219,14 @@ def local_checkout(git_dir, local_git_dir, commit):
     @param commit: the commit to checkout
     @type commit: false
     '''
-    # reset to a commit in case it's the first checkout and the masterbranch is
-    # missing
     branch_name = 'cerbero_build'
-    shell.call('%s reset --hard %s' % (GIT, commit), local_git_dir)
-    shell.call('%s branch %s' % (GIT, branch_name), local_git_dir, fail=False)
-    shell.call('%s checkout %s' % (GIT, branch_name), local_git_dir)
-    shell.call('%s reset --hard %s' % (GIT, commit), local_git_dir)
-    shell.call('%s clone %s -s -b %s .' % (GIT, local_git_dir, branch_name),
-               git_dir)
-    ensure_user_is_set(local_git_dir)
-    submodules_update(git_dir, local_git_dir)
+    await shell.async_call([GIT, 'checkout', commit, '-B', branch_name], local_git_dir, logfile=logfile)
+    await shell.async_call([GIT, 'clone', local_git_dir, '-s', '-b', branch_name, '.'],
+               git_dir, logfile=logfile)
+    ensure_user_is_set(git_dir, logfile=logfile)
+    await submodules_update(git_dir, local_git_dir, logfile=logfile)
 
-def add_remote(git_dir, name, url):
+def add_remote(git_dir, name, url, logfile=None):
     '''
     Add a remote to a git repository
 
@@ -230,9 +238,9 @@ def add_remote(git_dir, name, url):
     @type url: str
     '''
     try:
-        shell.call('%s remote add %s %s' % (GIT, name, url), git_dir)
+        shell.new_call([GIT, 'remote', 'add', name, url], git_dir, logfile=logfile)
     except:
-        shell.call('%s remote set-url %s %s' % (GIT, name, url), git_dir)
+        shell.new_call([GIT, 'remote', 'set-url', name, url], git_dir, logfile=logfile)
 
 
 def check_line_endings(platform):
@@ -247,13 +255,13 @@ def check_line_endings(platform):
     '''
     if platform != Platform.WINDOWS:
         return True
-    val = shell.check_call('git config --get core.autocrlf')
+    val = shell.check_output([GIT, 'config', '--get', 'core.autocrlf'], fail=False)
     if ('false' in val.lower()):
         return True
     return False
 
 
-def init_directory(git_dir):
+def init_directory(git_dir, logfile=None):
     '''
     Initialize a git repository with the contents
     of a directory
@@ -261,16 +269,12 @@ def init_directory(git_dir):
     @param git_dir: path of the git repository
     @type git_dir: str
     '''
-    init(git_dir)
-    try:
-        shell.call('%s add --force -A .' % GIT, git_dir)
-        shell.call('%s commit -m "Initial commit" > /dev/null 2>&1' % GIT,
-            git_dir)
-    except:
-        pass
+    init(git_dir, logfile=logfile)
+    shell.new_call([GIT, 'add', '--force', '-A', '.'], git_dir, logfile=logfile)
+    shell.new_call([GIT, 'commit', '-m', 'Initial commit'], git_dir, logfile=logfile)
 
 
-def apply_patch(patch, git_dir):
+def apply_patch(patch, git_dir, logfile=None):
     '''
     Applies a commit patch usign 'git am'
     of a directory
@@ -280,4 +284,4 @@ def apply_patch(patch, git_dir):
     @param patch: path of the patch file
     @type patch: str
     '''
-    shell.call('%s am --ignore-whitespace %s' % (GIT, patch), git_dir)
+    shell.new_call([GIT, 'am', '--ignore-whitespace', patch], git_dir, logfile=logfile)

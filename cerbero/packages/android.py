@@ -28,66 +28,18 @@ from cerbero.errors import UsageError
 class AndroidPackager(DistTarball):
     ''' Creates a distribution tarball for Android '''
 
-    def __init__(self, config, package, store):
-        DistTarball.__init__(self, config, package, store)
-
-    def files_list(self, package_type, force):
-        if self.config.target_arch != Architecture.UNIVERSAL:
-            # Nothing special to do for normal arches, just chain up
-            return PackagerBase.files_list(self, package_type, force)
-        else:
-            # For the universal architecture, collect files from each
-            # sub-archtecture
-            if package_type == PackageType.DEVEL:
-                files = self.package.devel_files_list()
-            else:
-                files = self.package.files_list()
-
-            all_files = []
-
-            if isinstance(self.config.universal_archs, list):
-                archs = self.config.universal_archs
-            elif isinstance(self.config.universal_archs, dict):
-                archs = list(self.config.universal_archs.keys())
-            else:
-                raise ConfigurationError('universal_archs must be a list or a dict')
-
-            for arch in archs:
-                all_files += [os.path.join(str(arch), f) for f in files]
-
-            return all_files
-
     def _create_tarball(self, output_dir, package_type, files, force,
                         package_prefix):
-        filenames = []
-
         # Filter out some unwanted directories for the development package
         if package_type == PackageType.DEVEL:
             for filt in ['bin/', 'share/aclocal']:
                 files = [x for x in files if not x.startswith(filt)]
+        return super()._create_tarball(output_dir, package_type, files, force, package_prefix)
 
-        # Create the bz2 file first
-        filename = os.path.join(output_dir, self._get_name(package_type))
-        if os.path.exists(filename):
-            if force:
-                os.remove(filename)
-            else:
-                raise UsageError("File %s already exists" % filename)
+    def _get_name(self, package_type, ext=None):
+        if ext is None:
+            ext = 'tar.' + self.compress
 
-        try:
-            with tarfile.open(filename, "w:bz2") as tar:
-                for f in files:
-                    filepath = os.path.join(self.prefix, f)
-                    tar.add(filepath, os.path.join(package_prefix, f))
-        except OSError:
-            os.replace(filename, filename + '.partial')
-            raise
-            
-        filenames.append(filename)
-
-        return  ' '.join(filenames)
-
-    def _get_name(self, package_type, ext='tar.bz2'):
         if package_type == PackageType.DEVEL:
             package_type = ''
         elif package_type == PackageType.RUNTIME:

@@ -9,25 +9,28 @@ class Package(custom.GStreamer, package.Package):
     longdesc = 'Base system dependencies'
     uuid = 'fae6046d-5a39-4d54-93ee-3770d2f316f5'
 
-    files = ['cairo:libs', 'expat:libs', 'fontconfig:libs:etc',
-             'gdk-pixbuf:bins:libs:modules:lang', 'libffi:libs', 'freetype:libs',
-             'glib:libs:lang:bins:schemas', 'orc:libs', 'pango:libs:modules',
-             'libpng:libs', 'tiff:libs', 'libjpeg-turbo:libs',
-             'libxml2:libs', 'pixman:libs', 'fribidi:libs',
-             'zlib:libs', 'bzip2:libs', 'harfbuzz:libs',
-             'libcroco:libs', 'librsvg:libs',
-             'json-glib:bins:libs']
+    files = ['cairo:libs', 'expat:libs', 'fontconfig:libs:etc', 'libffi:libs',
+             'freetype:libs', 'glib:libs:lang:bins:schemas', 'orc:libs',
+             'pango:libs:modules', 'libpng:libs', 'libjpeg-turbo:libs',
+             'tiff:libs', 'gdk-pixbuf:bins:libs:modules:lang', 'libcroco:libs',
+             'librsvg:libs', 'libxml2:libs', 'pixman:libs', 'fribidi:libs',
+             'zlib:libs', 'bzip2:libs', 'harfbuzz:libs', 'json-glib:bins:libs']
 
     platform_files = {
-        Platform.WINDOWS: ['proxy-libintl:libs:lang', 'libiconv:libs:lang',
-            'mingw-runtime', 'bionic-fixup:libs'],
-        Platform.DARWIN: ['proxy-libintl:libs:lang', 'bionic-fixup:libs'],
+        Platform.WINDOWS: ['proxy-libintl:libs:lang', 'mingw-runtime'],
+        Platform.DARWIN: ['proxy-libintl:libs:lang'],
         Platform.LINUX: [],
-        Platform.ANDROID: ['proxy-libintl:libs:lang', 'libiconv:libs:lang', 'gnustl',
-            'bionic-fixup:libs'],
-        Platform.IOS: ['proxy-libintl:libs:lang', 'bionic-fixup:libs']
+        Platform.ANDROID: ['proxy-libintl:libs:lang', 'libiconv:libs:lang', 'gnustl'],
+        Platform.IOS: ['proxy-libintl:libs:lang']
         }
 
     def prepare(self):
         if self.config.variants.gi:
             self.files.append('gobject-introspection:libs:typelibs')
+
+        if self.config.variants.uwp:
+            self.platform_files[Platform.WINDOWS] = ['proxy-libintl:libs:lang']
+            self.files = [
+                'libffi:libs', 'zlib:libs', 'glib:libs:lang:schemas', 'orc:libs',
+                'bzip2:libs', 'json-glib:libs',
+            ]

@@ -5,7 +5,7 @@ from cerbero.utils import shell
 class Recipe(recipe.Recipe):
     name = 'libtool'
     version = '2.4.6'
-    licenses = [License.GPLv2]
+    licenses = [License.GPLv2Plus]
     stype = SourceType.TARBALL
     url = 'gnu://'
     tarball_checksum = '7c87a8c2c8c0fc9cd5019e402bed4292462d00a718a7cd5f11218153bf28b26f'
@@ -26,13 +26,13 @@ class Recipe(recipe.Recipe):
         'share/aclocal/ltversion.m4',
         'share/aclocal/lt~obsolete.m4']
 
-    def extract(self):
+    async def extract(self):
         if os.path.exists(self.build_dir):
             shutil.rmtree(self.build_dir)
-        super(recipe.Recipe, self).extract()
+        await super(recipe.Recipe, self).extract()
 
-    def configure(self):
+    async def configure(self):
         shell.touch(os.path.join(self.build_dir, 'doc', 'libtool.1'))
         shell.touch(os.path.join(self.build_dir, 'doc', 'libtoolize.1'))
-        super(recipe.Recipe, self).configure()
+        await super(recipe.Recipe, self).configure()
 

@@ -19,15 +19,19 @@
 import os
 import re
 import glob
+import shutil
 import inspect
+from functools import partial
+import shlex
 from pathlib import Path
+import sysconfig
 
-from cerbero.config import Platform
+from cerbero.config import Platform, LibraryType
 from cerbero.utils import shell
 from cerbero.utils import messages as m
 from cerbero.errors import FatalError
 
-def find_shlib_regex(libname, prefix, libdir, ext, regex):
+def find_shlib_regex(config, libname, prefix, libdir, ext, regex):
     # Use globbing to find all files that look like they might match
     # this library to narrow down our exact search
     fpath = os.path.join(libdir, '*{0}*{1}*'.format(libname, ext))
@@ -41,21 +45,36 @@ def find_shlib_regex(libname, prefix, libdir, ext, regex):
             matches.append(os.path.join(libdir, fname))
     return matches
 
-def find_dll_implib(libname, prefix, libdir, ext, regex):
+def get_implib_dllname(config, path):
+    if config.msvc_env_for_toolchain and path.endswith('.lib'):
+        lib_exe = shutil.which('lib', path=config.msvc_env_for_toolchain['PATH'].get())
+        if not lib_exe:
+            raise FatalError('lib.exe not found, check cerbero configuration')
+        try:
+            ret = shell.check_output([lib_exe, '-list', path], env=config.env)
+        except FatalError:
+            return 0
+        # The last non-empty line should contain the dllname
+        return ret.split('\n')[-2]
+    dlltool = config.env.get('DLLTOOL', None)
+    if not dlltool:
+        raise FatalError('dlltool not found, check cerbero configuration')
+    try:
+        return shell.check_output(shlex.split(dlltool) + ['-I', path], env=config.env)
+    except FatalError:
+        return 0
+
+def find_dll_implib(config, libname, prefix, libdir, ext, regex):
     implibdir = 'lib'
     implibs = ['lib{}.dll.a'.format(libname), libname + '.lib', 'lib{}.lib'.format(libname)]
-    dlltool = os.environ.get('DLLTOOL', None)
-    if not dlltool:
-        raise FatalError('dlltool was not found, check cerbero configuration')
     implib_notfound = []
     for implib in implibs:
         path = os.path.join(prefix, implibdir, implib)
         if not os.path.exists(path):
             implib_notfound.append(implib)
             continue
-        try:
-            dllname = shell.check_call([dlltool, '-I', path])
-        except FatalError:
+        dllname = get_implib_dllname(config, path)
+        if dllname == 0:
             continue
         dllname = dllname.strip()
         if dllname == '':
@@ -68,11 +87,6 @@ def find_dll_implib(libname, prefix, libdir, ext, regex):
     path = os.path.join(prefix, libdir, dllname)
     if os.path.exists(path):
         return [os.path.join(libdir, dllname)]
-    # libvpx's build system does not build DLLs on Windows, so it's expected
-    # that the DLL can't be found. Similar code exists in _search_libraries()
-    # XXX: Remove this when libvpx is ported to Meson.
-    if libname == 'vpx':
-        return []
     if len(implib_notfound) == len(implibs):
         m.warning("No import libraries found for {!r}".format(libname))
     else:
@@ -81,31 +95,14 @@ def find_dll_implib(libname, prefix, libdir, ext, regex):
     # This will trigger an error in _search_libraries()
     return []
 
-def find_pdb_implib(libname, prefix):
-    dlls = find_dll_implib(libname, prefix, 'bin', None, None)
+def find_pdb_implib(config, libname, prefix):
+    dlls = find_dll_implib(config, libname, prefix, 'bin', None, None)
     pdbs = []
     for dll in dlls:
         pdb = dll[:-3] + 'pdb'
         if os.path.exists(os.path.join(prefix, pdb)):
             pdbs.append(pdb)
     return pdbs
-
-def flatten_files_list(all_files):
-    """
-    Some files search functions return a list of lists instead of a flat list
-    of files. We flatten it here.
-
-    Specifically, each list is a list of files found for each entry in
-    `recipe.files_libs`.
-    """
-    flattened = []
-    for entry_files in all_files:
-        if isinstance(entry_files, list):
-            for entry_file in entry_files:
-                flattened.append(entry_file)
-        else:
-            flattened.append(entry_files)
-    return flattened
 
 class FilesProvider(object):
     '''
@@ -127,7 +124,9 @@ class FilesProvider(object):
     # UNIX shared libraries can have between 0 and 3 version components:
     # major, minor, micro. We don't use {m,n} here because we want to capture
     # all the matches.
-    _SO_REGEX = r'^lib{}\.so(\.[0-9]+)?(\.[0-9]+)?(\.[0-9]+)?$'
+    _ANDROID_SO_REGEX = r'^lib{}\.so(\.[0-9]+)?(\.[0-9]+)?(\.[0-9]+)?$'
+    # Like _ANDROID_SO_REGEX but only libs with version number.
+    _LINUX_SO_REGEX = r'^lib{}\.so(\.[0-9]+)(\.[0-9]+)?(\.[0-9]+)?$'
     _DYLIB_REGEX = r'^lib{}(\.[0-9]+)?(\.[0-9]+)?(\.[0-9]+)?\.dylib$'
 
     # Extension Glob Legend:
@@ -141,14 +140,17 @@ class FilesProvider(object):
     EXTENSIONS = {
         Platform.WINDOWS: {'bext': '.exe', 'sregex': _DLL_REGEX, 'sdir': 'bin',
             'mext': '.dll', 'smext': '.a', 'pext': '.pyd', 'srext': '.dll'},
-        Platform.LINUX: {'bext': '', 'sregex': _SO_REGEX, 'sdir': 'lib',
+        Platform.LINUX: {'bext': '', 'sregex': _LINUX_SO_REGEX, 'sdir': 'lib',
             'mext': '.so', 'smext': '.a', 'pext': '.so', 'srext': '.so'},
-        Platform.ANDROID: {'bext': '', 'sregex': _SO_REGEX, 'sdir': 'lib',
+        Platform.ANDROID: {'bext': '', 'sregex': _ANDROID_SO_REGEX, 'sdir': 'lib',
             'mext': '.so', 'smext': '.a', 'pext': '.so', 'srext': '.so'},
         Platform.DARWIN: {'bext': '', 'sregex': _DYLIB_REGEX, 'sdir': 'lib',
             'mext': '.so', 'smext': '.a', 'pext': '.so', 'srext': '.dylib'},
         Platform.IOS: {'bext': '', 'sregex': _DYLIB_REGEX, 'sdir': 'lib',
             'mext': '.so', 'smext': '.a', 'pext': '.so', 'srext': '.dylib'}}
+
+    # Match static gstreamer plugins, GIO modules, etc.
+    _FILES_STATIC_PLUGIN_REGEX = re.compile(r'lib/.+/lib(gst|)([^/.]+)\.a')
 
     def __init__(self, config):
         self.config = config
@@ -156,8 +158,15 @@ class FilesProvider(object):
         self.extensions = self.EXTENSIONS[self.platform].copy()
         if self._dylib_plugins():
             self.extensions['mext'] = '.dylib'
-        self.py_prefix = config.py_prefix
+        if config.platform == Platform.WINDOWS:
+            # On Windows, py_prefix doesn't include Python version although some
+            # packages (pycairo, gi, etc...) install themselves using Python
+            # version scheme like on a posix system.
+            self.py_prefix = sysconfig.get_path('stdlib', 'posix_prefix', vars={'installed_base': ''})[1:]
+        else:
+            self.py_prefix = config.py_prefix
         self.add_files_bins_devel()
+        self.add_license_files()
         self.categories = self._files_categories()
         self._searchfuncs = {self.LIBS_CAT: self._search_libraries,
                              self.BINS_CAT: self._search_binaries,
@@ -178,6 +187,15 @@ class FilesProvider(object):
             return False
         return True
 
+    def add_license_files(self):
+        '''
+        Ensure that all license files are packaged
+        '''
+        if not hasattr(self, 'files_devel'):
+            self.files_devel = []
+        if self.licenses or getattr(self, 'licenses_bins', None):
+            self.files_devel.append('share/licenses/{}'.format(self.name))
+
     def add_files_bins_devel(self):
         '''
         When a recipe is built with MSVC, all binaries have a corresponding
@@ -185,7 +203,7 @@ class FilesProvider(object):
         is identical to `self.files_bins`, so we duplicate it here into a devel
         category. It will get included via the 'default' search function.
         '''
-        if not self.using_msvc():
+        if not self.using_msvc() or self.config.variants.nodebug:
             return
         pdbs = []
         if hasattr(self, 'files_bins'):
@@ -194,7 +212,9 @@ class FilesProvider(object):
         if hasattr(self, 'platform_files_bins'):
             for f in self.platform_files_bins.get(self.config.target_platform, []):
                 pdbs.append('bin/{}.pdb'.format(f))
-        self.files_bins_devel = pdbs
+        if not hasattr(self, 'files_bins_devel'):
+            self.files_bins_devel = []
+        self.files_bins_devel += pdbs
 
     def devel_files_list(self):
         '''
@@ -234,9 +254,11 @@ class FilesProvider(object):
             cat_files = self._list_files_by_category(cat)
             # The library search function returns a dict that is a mapping from
             # library name to filenames, but we only want a list of filenames
-            if not isinstance(cat_files, list):
-                cat_files = flatten_files_list(list(cat_files.values()))
-            files.extend(cat_files)
+            if isinstance(cat_files, dict):
+                for each in cat_files.values():
+                    files.extend(each)
+            else:
+                files.extend(cat_files)
         return sorted(list(set(files)))
 
     def files_list_by_category(self, category):
@@ -288,35 +310,56 @@ class FilesProvider(object):
                                        self._searchfuncs['default'])
         return search(self._get_category_files_list(category))
 
-    def _find_plugin_dll_files(self, f):
-        # Plugin template is always libfoo%(mext)s
-        if not f.startswith('lib'):
-            raise AssertionError('Plugin files must start with "lib": {!r}'.format(f))
-        # Plugin DLLs are required to be libfoo.dll (mingw) or foo.dll (msvc)
-        if (Path(self.config.prefix) / f).is_file():
-            # libfoo.dll
-            return [f]
-        if self.using_msvc():
-            fdir, fname = os.path.split(f)
-            fmsvc = '{}/{}'.format(fdir, fname[3:])
-            if (Path(self.config.prefix) / fmsvc).is_file():
-                # foo.dll, foo.pdb
-                return [fmsvc, fmsvc[:-3] + 'pdb']
-        raise FatalError('GStreamer plugin {!r} not found'.format(f))
+    def _search_pdb_files(self, static_lib_f, name):
+        # Plugin DLLs are required to be foo.dll when the recipe uses MSVC, and
+        # will be in the same directory as the .a static plugin/library
+        fdir = os.path.dirname(static_lib_f)
+        fdll = '{}/{}.dll'.format(fdir, name)
+        if not (Path(self.config.prefix) / fdll).is_file():
+            # XXX: Make this an error when we have MSVC CI
+            m.warning('static library {} does not have a corresponding dll?'.format(static_lib_f))
+            return []
+        return ['{}/{}.pdb'.format(fdir, name)]
+
+    @staticmethod
+    def _get_msvc_dll(f):
+        f = Path(f)
+        return str(f.with_name(f.name[3:]))
+
+    @staticmethod
+    def _get_plugin_pc(f):
+        f = Path(f)
+        return str(f.parent / 'pkgconfig' / (f.name[3:-3] + '.pc'))
 
     def _search_files(self, files):
         '''
         Search plugin files and arbitrary files in the prefix, doing the
         extension replacements, globbing, and listing directories
+
+        FIXME: Curently plugins are also searched using this, but there should
+        be a separate system for those.
         '''
         # replace extensions
         files_expanded = [f % self.extensions for f in files]
         fs = []
         for f in files_expanded:
-            if not f.endswith('.dll'):
+            if f.endswith('.dll') and self.using_msvc():
+                fs.append(self._get_msvc_dll(f))
+            else:
                 fs.append(f)
-                continue
-            fs += self._find_plugin_dll_files(f)
+            # Look for a PDB file and add it
+            if self.using_msvc() and self.config.variants.debug:
+                # We try to find a pdb file corresponding to the plugin's .a
+                # file instead of the .dll because we want it to go into the
+                # devel package, not the runtime package.
+                m = self._FILES_STATIC_PLUGIN_REGEX.match(f)
+                if m:
+                    fs += self._search_pdb_files(f, ''.join(m.groups()))
+            # For plugins, the .la file is generated using the .pc file, but we
+            # don't add the .pc to files_devel. It has the same name, so we can
+            # add it using the .la entry.
+            if f.startswith('lib/gstreamer-1.0/') and f.endswith('.la'):
+                fs.append(self._get_plugin_pc(f))
         # fill directories
         dirs = [x for x in fs if
                 os.path.isdir(os.path.join(self.config.prefix, x))]
@@ -357,7 +400,9 @@ class FilesProvider(object):
               files. We use the libname (the key) in gen_library_file so we
               don't have to guess (incorrectly) based on the dll filename.
         '''
-        libdir = self.extensions['sdir']
+        if self.library_type == LibraryType.STATIC:
+            return {}
+        libdir = self.extensions['sdir'] + self.config.lib_suffix
         libext = self.extensions['srext']
         libregex = self.extensions['sregex']
         if libregex:
@@ -370,9 +415,9 @@ class FilesProvider(object):
         libsmatch = {}
         notfound = []
         for f in files:
-            libsmatch[f] = find_func(f[3:], self.config.prefix, libdir, libext,
-                                     libregex)
-            if not libsmatch[f] and f != 'libvpx':
+            libsmatch[f] = find_func(self.config, f[3:], self.config.prefix,
+                                     libdir, libext, libregex)
+            if not libsmatch[f]:
                 notfound.append(f)
 
         # It's ok if shared libraries aren't found for iOS, we only want the
@@ -389,7 +434,7 @@ class FilesProvider(object):
         if os.path.exists(os.path.join(self.config.prefix, f)):
             return f
         else:
-            pydir = os.path.basename(os.path.normpath(self.config.py_prefix))
+            pydir = os.path.basename(os.path.normpath(self.py_prefix))
             pyversioname = re.sub("python|\.", '', pydir)
             cpythonname = "cpython-" + pyversioname
 
@@ -422,9 +467,10 @@ class FilesProvider(object):
         path to the given list of files
         '''
         pyfiles = []
+        files = [f % self.extensions for f in files]
+        files = ['%s/%s' % (self.py_prefix, f) for f in files]
+        files = self._search_files (files)
         for f in files:
-            f = f % self.extensions
-            f = '%s/%s' % (self.py_prefix, f)
             real_name = self._pyfile_get_name(f)
             if real_name:
                 pyfiles.append(real_name)
@@ -489,29 +535,44 @@ class FilesProvider(object):
         return files
 
     def _search_devel_libraries(self):
+        if self.runtime_dep:
+            return []
+
         devel_libs = []
         for category in self.categories:
             if category != self.LIBS_CAT and \
                not category.startswith(self.LIBS_CAT + '_'):
                 continue
 
-            pattern = 'lib/%(f)s.a lib/%(f)s.la '
-            if self.platform == Platform.LINUX:
-                pattern += 'lib/%(f)s.so '
-            elif self.platform == Platform.WINDOWS:
-                pattern += 'lib/%(f)s.dll.a '
-                pattern += 'lib/%(f)s.def '
-                pattern += 'lib/%(fnolib)s.lib '
-            elif self.platform in [Platform.DARWIN, Platform.IOS]:
-                pattern += 'lib/%(f)s.dylib '
+            pattern = ''
+            if self.library_type != LibraryType.NONE:
+                pattern += 'lib/%(f)s.la '
+
+            if self.library_type in (LibraryType.BOTH, LibraryType.STATIC):
+                pattern += 'lib/%(f)s.a '
+
+            if self.library_type in (LibraryType.BOTH, LibraryType.SHARED):
+                if self.platform == Platform.LINUX:
+                    pattern += 'lib/%(f)s.so '
+                elif self.platform == Platform.WINDOWS:
+                    pattern += 'lib/%(f)s.dll.a '
+                    pattern += 'lib/%(f)s.def '
+                    pattern += 'lib/%(fnolib)s.lib '
+                elif self.platform in [Platform.DARWIN, Platform.IOS]:
+                    pattern += 'lib/%(f)s.dylib '
 
             libsmatch = []
             for x in self._get_category_files_list(category):
                 libsmatch.append(pattern % {'f': x, 'fnolib': x[3:]})
                 # PDB names are derived from DLL library names (which are
                 # arbitrary), so we must use the same search function for them.
-                if self.platform == Platform.WINDOWS and self.can_msvc:
-                    devel_libs += find_pdb_implib(x[3:], self.config.prefix)
+                if self.platform != Platform.WINDOWS:
+                    continue
+                if not self.using_msvc() or self.config.variants.nodebug:
+                    continue
+                if self.library_type in (LibraryType.STATIC, LibraryType.NONE):
+                    continue
+                devel_libs += find_pdb_implib(self.config, x[3:], self.config.prefix)
             devel_libs.extend(shell.ls_files(libsmatch, self.config.prefix))
         return devel_libs
 
@@ -523,3 +584,70 @@ class FilesProvider(object):
                 _root = _root[1:]
             files.extend([os.path.join(_root, x) for x in filenames])
         return files
+
+
+class UniversalFilesProvider(FilesProvider):
+
+    def __init__(self, config):
+        # Override all search functions with an aggregating search function.
+        for name in dir(FilesProvider):
+            if not name.startswith('_search') or name == '_search_libraries':
+                continue
+            setattr(self, name, partial(self._aggregate_files_search_func, name))
+
+    def get_arch_file(self, arch, f):
+        '''
+        Layout is split into separate arch-specific prefixes (android-universal)
+        '''
+        return '{}/{}'.format(arch, f)
+
+    def _search_libraries(self, *args, **kwargs):
+        # This is handled separately, assert that it's not called directly to avoid bugs
+        raise AssertionError('Should not be called')
+
+    def _aggregate_files_search_func(self, funcname, *args):
+        files = set()
+        for r in self._recipes.values():
+            searchfunc = getattr(r, funcname)
+            for f in searchfunc(*args):
+                files.add(self.get_arch_file(r.config.target_arch, f))
+        return list(files)
+
+    def _aggregate_libraries(self, category):
+        files = {}
+        for r in self._recipes.values():
+            for name, rfiles in r._list_files_by_category(category).items():
+                if name not in files:
+                    files[name] = set()
+                for f in rfiles:
+                    files[name].add(self.get_arch_file(r.config.target_arch, f))
+        for name in files:
+            files[name] = list(files[name])
+        return files
+
+    def _aggregate_files(self, category):
+        files = set()
+        for r in self._recipes.values():
+            for f in r._list_files_by_category(category):
+                files.add(self.get_arch_file(r.config.target_arch, f))
+        return list(files)
+
+    # This can't be on the UniversalRecipe class because it must override the
+    # same method on the FilesProvider class.
+    def _list_files_by_category(self, category):
+        '''
+        Reimplement the files provider base function to aggregate files from
+        each target_arch recipe in UniversalRecipe.
+        '''
+        if category == self.LIBS_CAT:
+            return self._aggregate_libraries(category)
+        return self._aggregate_files(category)
+
+class UniversalFlatFilesProvider(UniversalFilesProvider):
+
+    def get_arch_file(self, arch, f):
+        '''
+        Layout is one common prefix will all arch-specific files merged into it
+        with `lipo` (ios-universal)
+        '''
+        return f

@@ -18,13 +18,7 @@
 
 from cerbero import hacks
 
-try:
-    import argparse
-except ImportError as e:
-    print("Could not import argparse. Try installing it with "\
-          "'sudo easy_install argparse")
-    raise e
-
+import argparse
 import sys
 import errno
 import logging
@@ -35,7 +29,7 @@ import time
 from cerbero import config, commands
 from cerbero.errors import UsageError, FatalError, BuildStepError, \
     ConfigurationError, CerberoException, AbortedError
-from cerbero.utils import _, N_, user_is_root, git
+from cerbero.utils import _, N_, user_is_root, git, run_until_complete
 from cerbero.utils import messages as m
 from cerbero.utils.manifest import Manifest
 
@@ -55,6 +49,7 @@ class Main(object):
         self.self_update()
         self.init_logging()
         self.load_config()
+        self.list_variants()
         self.run_command()
 
     def check_in_cerbero_shell(self):
@@ -80,16 +75,26 @@ class Main(object):
 
     def create_parser(self):
         ''' Creates the arguments parser '''
+        class VariantAction(argparse.Action):
+            def __call__(self, parser, namespace, value, option_string=None):
+                current = getattr(namespace, self.dest) or []
+                # Convert comma-separated string to list
+                additional = [v for v in value.split(',')]
+                setattr(namespace, self.dest, current + additional)
+
         self.parser = argparse.ArgumentParser(description=_(description))
         self.parser.add_argument('-t', '--timestamps', action='store_true', default=False,
                 help=_('Print timestamps with every message printed'))
+        self.parser.add_argument('--list-variants', action='store_true', default=False,
+                help=_('List available variants'))
+        self.parser.add_argument('-v', '--variants', action=VariantAction, default=None,
+                help=_('Variants to be used for the build'))
         self.parser.add_argument('-c', '--config', action='append', type=str, default=None,
                 help=_('Configuration file used for the build'))
         self.parser.add_argument('-m', '--manifest', action='store', type=str, default=None,
                 help=_('Manifest file used to fixate git revisions'))
-        if os.path.basename(sys.argv[0]) == 'cerbero-uninstalled':
-            self.parser.add_argument('--self-update', action='store', type=str, default=None,
-                    help=_('Update cerbero git repository from manifest and exit.'))
+        self.parser.add_argument('--self-update', action='store', type=str, default=None,
+                                 help=_('Update cerbero git repository from manifest and exit.'))
 
     def parse_arguments(self, args):
         ''' Parse the command line arguments '''
@@ -97,6 +102,13 @@ class Main(object):
         if len(args) == 0:
             args = ["-h"]
         self.args = self.parser.parse_args(args)
+
+    def list_variants(self):
+        if not self.args.list_variants:
+            return
+        print('Available boolean variants are: ' + ', '.join(self.config.variants.bools()))
+        print('Available mapping variants are: ' + ', '.join(self.config.variants.mappings()))
+        sys.exit(0)
 
     def self_update(self):
         '''Update this instance of cerbero git repository'''
@@ -110,12 +122,12 @@ class Main(object):
             project = manifest.find_project('cerbero')
             git_dir = os.path.dirname(sys.argv[0])
             git.add_remote(git_dir, project.remote, project.fetch_uri)
-            git.fetch(git_dir)
-            git.checkout(git_dir, project.revision)
+            run_until_complete(git.fetch(git_dir))
+            run_until_complete(git.checkout(git_dir, project.revision))
         except FatalError as ex:
             self.log_error(_("ERROR: Failed to proceed with self update %s") %
                     ex)
-        exit(0)
+        sys.exit(0)
 
     def load_commands(self):
         subparsers = self.parser.add_subparsers(help=_('sub-command help'),
@@ -126,7 +138,9 @@ class Main(object):
         ''' Load the configuration '''
         try:
             self.config = config.Config()
-            self.config.load(self.args.config)
+            if self.args.command == 'shell':
+                self.config.for_shell = True
+            self.config.load(self.args.config, self.args.variants)
             if self.args.manifest:
                 self.config.manifest = self.args.manifest
         except ConfigurationError as exc:
@@ -160,7 +174,13 @@ class Main(object):
 
 
 def main():
-    Main(sys.argv[1:])
+    if 'CERBERO_PROFILING' in os.environ:
+        import cProfile
+        pfile = 'cerbero-profile.log'
+        print('Outputting profiling information to {!r}'.format(pfile))
+        cProfile.runctx('Main(sys.argv[1:])', globals(), locals(), filename=pfile)
+    else:
+        Main(sys.argv[1:])
 
 
 if __name__ == "__main__":

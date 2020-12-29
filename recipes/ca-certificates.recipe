@@ -13,15 +13,17 @@ class Recipe(recipe.Recipe):
     stype = SourceType.CUSTOM
     btype = BuildType.CUSTOM
 
+    can_msvc = True
+
     files_etc = [
             'etc/ssl/certs/ca-certificates.crt',
             ]
 
-    def install(self):
+    async def install(self):
         dst_dir = os.path.join(self.config.prefix, 'etc', 'ssl', 'certs')
         if not os.path.exists(dst_dir):
             os.makedirs(dst_dir)
-        src_dir = os.path.join(self.config.recipes_dir, 'ca-certificates')
+        src_dir = os.path.join(self.recipe_dir(), self.name)
         for f in self.files_etc:
             fname = os.path.basename(f)
             s = os.path.join(src_dir, fname)

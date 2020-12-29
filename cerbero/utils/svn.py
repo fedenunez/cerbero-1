@@ -19,7 +19,7 @@
 from cerbero.utils import shell
 
 
-def checkout(url, dest):
+async def checkout(url, dest):
     '''
     Checkout a url to a given destination
 
@@ -28,10 +28,10 @@ def checkout(url, dest):
     @param dest: path where to do the checkout
     @type url: string
     '''
-    shell.call('svn co --non-interactive --trust-server-cert %s %s' % (url, dest))
+    await shell.async_call(['svn', 'co', '--non-interactive', '--trust-server-cert', url, dest], cpu_bound=False)
 
 
-def update(repo, revision='HEAD'):
+async def update(repo, revision='HEAD'):
     '''
     Update a repositry to a given revision
 
@@ -40,7 +40,7 @@ def update(repo, revision='HEAD'):
     @param revision: the revision to checkout
     @type revision: str
     '''
-    shell.call('svn up --non-interactive --trust-server-cert -r %s' % revision, repo)
+    await shell.async_call(['svn', 'up', '--non-interactive', '--trust-server-cert', '-r', revision], repo, cpu_bound=False)
 
 
 def checkout_file(url, out_path):
@@ -52,7 +52,7 @@ def checkout_file(url, out_path):
     @param out_path: output path
     @type revision: str
     '''
-    shell.call('svn export --force %s %s' % (url, out_path))
+    shell.new_call(['svn', 'export', '--force', url, out_path])
 
 
 def revision(repo):
@@ -62,7 +62,7 @@ def revision(repo):
     @param repo: the path to the repository
     @type  repo: str
     '''
-    rev = shell.check_call('svnversion', repo).split('\n')[0]
+    rev = shell.check_output(['svnversion'], cmd_dir=repo).splitlines()[0]
     if rev[-1] == 'M':
         rev = rev[:-1]
     return rev

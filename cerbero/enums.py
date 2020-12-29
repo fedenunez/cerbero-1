@@ -16,6 +16,11 @@
 # Free Software Foundation, Inc., 59 Temple Place - Suite 330,
 # Boston, MA 02111-1307, USA.
 
+from cerbero.errors import FatalError
+
+
+# Safest place to define this since this file imports very few modules
+CERBERO_VERSION = '1.18.2.1'
 
 class Platform:
     ''' Enumeration of supported platforms '''
@@ -71,6 +76,8 @@ class DistroVersion:
     DEBIAN_JESSIE = 'debian_08_jessie'
     DEBIAN_STRETCH = 'debian_09_stretch'
     DEBIAN_BUSTER = 'debian_10_buster'
+    DEBIAN_BULLSEYE = 'debian_11_bullseye'
+    DEBIAN_SID = 'debian_99_sid'
     UBUNTU_LUCID = 'ubuntu_10_04_lucid'
     UBUNTU_MAVERICK = 'ubuntu_10_10_maverick'
     UBUNTU_NATTY = 'ubuntu_11_04_natty'
@@ -87,6 +94,9 @@ class DistroVersion:
     UBUNTU_ARTFUL = 'ubuntu_17_10_artful'
     UBUNTU_BIONIC = 'ubuntu_18_04_bionic'
     UBUNTU_COSMIC = 'ubuntu_18_10_cosmic'
+    UBUNTU_DISCO = 'ubuntu_19_04_disco'
+    UBUNTU_EOAN = 'ubuntu_19_10_eoan'
+    UBUNTU_FOCAL = 'ubuntu_20_04_focal'
     FEDORA_16 = 'fedora_16'
     FEDORA_17 = 'fedora_17'
     FEDORA_18 = 'fedora_18'
@@ -101,8 +111,12 @@ class DistroVersion:
     FEDORA_27 = 'fedora_27'
     FEDORA_28 = 'fedora_28'
     FEDORA_29 = 'fedora_29'
+    FEDORA_30 = 'fedora_30'
+    FEDORA_31 = 'fedora_31'
+    FEDORA_32 = 'fedora_32'
     REDHAT_6 = 'redhat_6'
     REDHAT_7 = 'redhat_7'
+    REDHAT_8 = 'redhat_8'
     # Amazon Linux seems to be RedHat/CentOS-based
     AMAZON_LINUX = 'amazon_linux'
     ARCH_ROLLING = 'rolling'
@@ -123,6 +137,8 @@ class DistroVersion:
     OS_X_SIERRA = 'osx_sierra'
     OS_X_HIGH_SIERRA = 'osx_high_sierra'
     OS_X_MOJAVE = 'osx_mojave'
+    OS_X_CATALINA = 'osx_catalina'
+    OS_X_BIG_SUR = 'osx_big_sur'
     IOS_8_0 = 'ios_08_0'
     IOS_8_1 = 'ios_08_1'
     IOS_8_2 = 'ios_08_2'
@@ -143,13 +159,23 @@ class DistroVersion:
     IOS_11_4 = 'ios_11_4'
     IOS_12_0 = 'ios_12_0'
     IOS_12_1 = 'ios_12_1'
+    IOS_12_2 = 'ios_12_2'
+    IOS_12_3 = 'ios_12_3'
+    IOS_12_4 = 'ios_12_4'
+    # further ios versions are generated automatically
     ANDROID_GINGERBREAD = 'android_09_gingerbread'  # API Level 9
     ANDROID_ICE_CREAM_SANDWICH = 'android_14_ice_cream_sandwich'  # API Level 14
     ANDROID_JELLY_BEAN = 'android_16_jelly_bean'  # API Level 16
     ANDROID_KITKAT = 'android_19_kitkat'  # API Level 19
     ANDROID_LOLLIPOP = 'android_21_lollipop' # API Level 21
+    ANDROID_LOLLIPOP_MR1 = 'android_22_lollipop_mr1' # API Level 22
     ANDROID_MARSHMALLOW = 'android_23_marshmallow' # API Level 23
     ANDROID_NOUGAT = 'android_24_nougat' # API Level 24
+    ANDROID_NOUGAT_MR1 = 'android_25_nougat_mr1' # API Level 25
+    ANDROID_OREO = 'android_26_oreo' # API Level 26
+    ANDROID_OREO_MR1 = 'android_27_oreo_mr1' # API Level 27
+    ANDROID_PIE = 'android_28_pie' # API Level 28
+    ANDROID_Q = 'android_29_q' # API Level 29
     NONE_UCLIBC = 'none_uclibc'
     NONE_GLIBC = 'none_glibc'
 
@@ -166,12 +192,30 @@ class DistroVersion:
             return 19
         elif version == DistroVersion.ANDROID_LOLLIPOP:
             return 21
+        elif version == DistroVersion.ANDROID_LOLLIPOP_MR1:
+            return 22
         elif version == DistroVersion.ANDROID_MARSHMALLOW:
             return 23
         elif version == DistroVersion.ANDROID_NOUGAT:
             return 24
+        elif version == DistroVersion.ANDROID_NOUGAT_MR1:
+            return 25
+        elif version == DistroVersion.ANDROID_OREO:
+            return 26
+        elif version == DistroVersion.ANDROID_OREO_MR1:
+            return 27
+        elif version == DistroVersion.ANDROID_PIE:
+            return 28
+        elif version == DistroVersion.ANDROID_Q:
+            return 29
         else:
             raise FatalError("DistroVersion not supported")
+
+    @staticmethod
+    def get_ios_sdk_version(version):
+        if not version.startswith('ios_'):
+            raise FatalError('Not an iOS version: ' + version)
+        return [int(s) for s in version[4:].split('_')]
 
 class LicenseDescription:
 
@@ -187,63 +231,42 @@ class LicenseDescription:
 
 class License:
     ''' Enumeration of licensesversions '''
-    AFLv2_1 = LicenseDescription('AFL-2.1',
-            'Academic Free License, version 2.1')
     Apachev2 = LicenseDescription('Apache-2.0',
             'Apache License, version 2.0')
     BSD = LicenseDescription('BSD',
             'BSD License')
     BSD_like = LicenseDescription('BSD-like',
             'BSD-like License')
-    CC_BY_SA = LicenseDescription('CC-BY-SA',
-            'Creative Commons Attribution-ShareAlike')
     FreeType = LicenseDescription('FreeType',
             'FreeType License')
-    Jasperv2 = LicenseDescription('Jasper-2.0',
-            'JasPer LicenseVersion 2.0')
-    JPEG = LicenseDescription('JPEG',
-            'JasPer LicenseVersion 2.0')
-    GFDL = LicenseDescription('GFDL',
-            'GNU Free Documentation License')
-    GPL = LicenseDescription('GPL',
-            'GNU General Public License')
-    GPLv1 = LicenseDescription('GPL-1',
-            'GNU General Public License, version 1')
-    GPLv1Plus = LicenseDescription('GPL-1+',
-            'GNU General Public License, version 1 or later')
-    GPLv2 = LicenseDescription('GPL-2',
-            'GNU General Public License, version 2')
     GPLv2Plus = LicenseDescription('GPL-2+',
             'GNU General Public License, version 2 or later')
-    GPLv3 = LicenseDescription('GPL-3',
-            'GNU General Public License, version 3')
     GPLv3Plus = LicenseDescription('GPL-3+',
             'GNU General Public License, version 3 or later')
-    LGPL = LicenseDescription('LGPL',
-            'GNU Lesser General Public License')
-    LGPLv2 = LicenseDescription('LGPL-2',
-            'GNU Lesser General Public License, version 2')
     LGPLv2Plus = LicenseDescription('LGPL-2+',
             'GNU Lesser General Public License, version 2 or later')
-    LGPLv2_1 = LicenseDescription('LGPL-2.1',
-            'GNU Lesser General Public License, version 2.1')
     LGPLv2_1Plus = LicenseDescription('LGPL-2.1+',
             'GNU Lesser General Public License, version 2.1 or later')
-    LGPLv3 = LicenseDescription('LGPL-3',
-            'GNU Lesser General Public License, version 3')
     LGPLv3Plus = LicenseDescription('LGPL-3+',
             'GNU Lesser General Public License, version 3 or later')
+    LibPNG = LicenseDescription('LibPNG',
+            'LibPNG License')
     MPLv1_1 = LicenseDescription('MPL-1.1',
             'Mozilla Public License Version 1.1')
     MPLv2 = LicenseDescription('MPL-2',
             'Mozilla Public License Version 2.0')
-    LibPNG = LicenseDescription('LibPNG',
-            'LibPNG License')
     MIT = LicenseDescription('MIT',
             'MIT License')
     OPENSSL = LicenseDescription('OpenSSL',
             'OpenSSL License')
-    PUBLIC_DOMAIN = LicenseDescription('PublicDomain',
-            'Public domain')
     Proprietary = LicenseDescription('Proprietary',
             'Proprietary License')
+    PublicDomain = LicenseDescription('PublicDomain', 'Public Domain')
+    Misc = LicenseDescription('Misc',
+            'Miscellaneous license information')
+
+class LibraryType:
+    NONE = 'none'
+    STATIC = 'static'
+    SHARED = 'shared'
+    BOTH = 'both'

@@ -1,33 +1,42 @@
 # -*- Mode: Python -*- vi:si:et:sw=4:sts=4:ts=4:syntax=python
 
-import subprocess
-from pathlib import PurePath
+import shutil
+from pathlib import PurePath, Path
 
 class Recipe(recipe.Recipe):
     name = 'meson'
-    version = '0.49.0'
+    version = '0.54.0'
     licenses = [License.Apachev2]
     btype = BuildType.CUSTOM
     stype = SourceType.TARBALL
     url = 'https://github.com/mesonbuild/meson/releases/download/%(version)s/meson-%(version)s.tar.gz'
-    tarball_checksum = 'fb0395c4ac208eab381cd1a20571584bdbba176eb562a7efa9cb17cace0e1551'
+    tarball_checksum = 'dde5726d778112acbd4a67bb3633ab2ee75d33d1e879a6283a7b4a44c3363c27'
     patches = [
-        # https://github.com/mesonbuild/meson/pull/3939
-        'meson/0002-Fix-linking-of-shared-static-libs-with-static-libs.patch',
-        # https://github.com/mesonbuild/meson/issues/4100
-        'meson/0001-Revert-Fail-some-impossible-cross-detections.patch',
+        # Remove this on bump to 0.54.1, https://github.com/mesonbuild/meson/pull/6896
+        'meson/0001-qt-dependency-Pick-debug-libraries-based-on-b_vscrt.patch',
+        # https://github.com/mesonbuild/meson/pull/7138
+        'meson/0001-ui-qt-use-new-directory-layout-for-qt-on-android.patch',
+        # https://github.com/mesonbuild/meson/pull/7021
+        'meson/0001-meson-Allow-cross-compile-without-a-native-compiler.patch',
+        # https://github.com/mesonbuild/meson/pull/7272
+        'meson/0001-Add-UNIX-large-file-support-for-MinGW.patch',
     ]
+
     deps = ['ninja']
 
     files_bin = ['bin/meson']
     files_python = []
 
-    def install(self):
+    async def install(self):
         # setup.py barfs if using posix paths on Windows
         if self.config.platform == Platform.WINDOWS:
             prefix = str(PurePath(self.config.prefix))
         else:
             prefix = self.config.prefix
-        # Use subprocess.check_call because we don't want to bother with shell quoting
-        subprocess.check_call([self.config.python_exe, 'setup.py', 'install', '--prefix', prefix],
-                              cwd=self.build_dir)
+        await shell.async_call([self.config.python_exe, 'setup.py', 'install', '--prefix', prefix],
+                       cmd_dir=self.build_dir, env=self.env, logfile=self.logfile)
+        if self.config.platform == Platform.WINDOWS:
+            prefix = Path(self.config.prefix)
+            for f in ('meson.exe', 'meson-script.py'):
+                (prefix / 'Scripts' / f).replace(prefix / 'bin' / f)
+            shutil.rmtree(prefix / 'Scripts')
