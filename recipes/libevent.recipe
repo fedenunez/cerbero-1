@@ -20,7 +20,7 @@ class Recipe(recipe.Recipe):
 
     patches = ['libevent/2.1.8-stable/0001-Replace-checking-of-WNOWAIT-in-waitpid-with-waitid.patch', 'libevent/2.1.8-stable/0001-Removes-arc4random_addrandom-dependency.patch' ]
     #files_libs = ['libevent_core.a', 'libevent_extra.a']
-    files_devel = ['include', 'lib/libevent.a','lib/libevent_core.a', 'lib/libevent_extra.a'] 
+    files_devel = ['include/event2','include','lib/libevent.a','lib/libevent_core.a', 'lib/libevent_extra.a'] 
     def prepare(self):
         if self.config.target_platform == Platform.WINDOWS:
             self.configure_options += ' -DWIN32=1'
@@ -32,8 +32,8 @@ class Recipe(recipe.Recipe):
         self.configure_options += ' -DZLIB_ROOT=%s ' % self.config.prefix
 
 
-    def install(self):
-        super(recipe.Recipe, self).install()
+    async def install(self):
+        await super(recipe.Recipe, self).install()
         bindir = Path(self.config.prefix) / 'lib'
         if not bindir.is_dir():
             bindir.mkdir(parents=True, exist_ok=True)
